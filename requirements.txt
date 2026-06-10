@@ -1,0 +1,15 @@
+Django>=5.0
+djangorestframework
+djangorestframework-simplejwt
+django-redis
+django-cors-headers
+django-storages[s3]
+celery
+redis
+Pillow
+PyJWT
+python-dateutil
+requests
+python-decouple
+boto3
+psycopg2-binary
