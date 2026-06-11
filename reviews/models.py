@@ -6,6 +6,8 @@ from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.db.models import Avg
 
+from listings.models import Product
+
 DIRECTION_CHOICES = [
     ('renter_to_owner', 'Renter → Owner'),
     ('owner_to_renter', 'Owner → Renter'),
@@ -54,16 +56,20 @@ class Review(models.Model):
 
     def _recompute_ratings(self):
         if self.direction == 'renter_to_owner':
-            avg = (
-                Review.objects.filter(
-                    product_id=self.product_id, direction='renter_to_owner'
-                )
-                .aggregate(avg=Avg('rating'))['avg']
-                or 0
-            )
-            from listings.models import Product
-            Product.objects.filter(pk=self.product_id).update(average_rating=avg)
+            self._recompute_product_rating()
+        self._recompute_reviewee_rating()
 
+    def _recompute_product_rating(self):
+        avg = (
+            Review.objects.filter(
+                product_id=self.product_id, direction='renter_to_owner'
+            )
+            .aggregate(avg=Avg('rating'))['avg']
+            or 0
+        )
+        Product.objects.filter(pk=self.product_id).update(average_rating=avg)
+
+    def _recompute_reviewee_rating(self):
         avg = (
             Review.objects.filter(reviewee_id=self.reviewee_id)
             .aggregate(avg=Avg('rating'))['avg']

@@ -15,8 +15,12 @@ def auth_headers(user):
 
 
 def make_completed_rental(*, renter=None, owner=None, completed_days_ago=0):
-    """Helper: completed rental with correct status_history timestamp."""
-    completed_at = timezone.now() - timedelta(days=completed_days_ago)
+    """Helper: completed rental with correct status_history timestamp.
+
+    Add 1-hour buffer so boundary tests (e.g. completed_days_ago=30) land
+    safely inside the allowed window despite test-execution wall-clock drift.
+    """
+    completed_at = timezone.now() - timedelta(days=completed_days_ago) + timedelta(hours=1)
     kwargs = {
         'status': 'completed',
         'status_history': [
@@ -115,7 +119,7 @@ class TestReviewCreate(TestCase):
 
     def test_30_days_exactly_still_allowed(self):
         recent_rental = make_completed_rental(
-            renter=self.renter, completed_days_ago=29
+            renter=self.renter, completed_days_ago=30
         )
         r = self._post(self.renter, recent_rental.pk)
         self.assertEqual(r.status_code, 201)
@@ -290,13 +294,10 @@ class TestReviewPending(TestCase):
         self.assertEqual(len(r.json()['data']), 0)
 
     def test_pending_excludes_non_completed_rentals(self):
-        RentalFactory(renter=self.renter, status='accepted')
+        accepted = RentalFactory(renter=self.renter, status='accepted')
         r = self.client.get('/api/reviews/pending/', **auth_headers(self.renter))
         ids = [item['id'] for item in r.json()['data']]
-        # Only the completed one should appear
-        self.assertNotIn(  # accepted rental not in pending
-            RentalFactory.__name__, ids
-        )
+        self.assertNotIn(str(accepted.pk), ids)
         self.assertEqual(len(ids), 1)
 
     def test_pending_requires_auth(self):
