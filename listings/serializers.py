@@ -73,9 +73,12 @@ class UnavailablePeriodSerializer(serializers.ModelSerializer):
 
 class ProductSerializer(serializers.ModelSerializer):
   # Write: list of uploaded files. Read: nested objects (see to_representation).
+  # required=False so partial updates (PATCH) that don't change images pass validation.
+  # create() path enforces at-least-one via validate().
   images = serializers.ListField(
     child=serializers.ImageField(allow_empty_file=False, use_url=False),
     write_only=True,
+    required=False,
     min_length=1,
     max_length=8,
     error_messages={
@@ -157,7 +160,8 @@ class ProductSerializer(serializers.ModelSerializer):
   def _parse_nested_list(self, key):
     """
     Pulls a nested list out of initial_data. Multipart sends it as a JSON
-    string; JSON bodies send a real list. Returns None when absent.
+    string (single key) or repeated keys (list of strings); JSON bodies send
+    a real list. Returns None when absent.
     """
     if key not in self.initial_data:
       return None
@@ -172,17 +176,37 @@ class ProductSerializer(serializers.ModelSerializer):
         raise serializers.ValidationError({key: [_('Invalid JSON.')]})
     if not isinstance(raw, list):
       raise serializers.ValidationError({key: [_('Expected a list.')]})
-    return raw
+    # Normalize: multipart repeated keys yield a list of strings — parse each
+    normalized = []
+    for item in raw:
+      if isinstance(item, str):
+        try:
+          normalized.append(json.loads(item))
+        except json.JSONDecodeError:
+          raise serializers.ValidationError({key: [_('Invalid JSON.')]})
+      else:
+        normalized.append(item)
+    return normalized
 
   def _validate_nested(self, key, child_serializer_class, items):
     validated = []
     for item in items:
-      child = child_serializer_class(data=item)
+      child = child_serializer_class(data=item, context=self.context)
       child.is_valid(raise_exception=True)
       validated.append(child.validated_data)
     return validated
 
+  def _replace_related(self, instance, related_manager, create_kwargs_list):
+    related_manager.all().delete()
+    for kwargs in create_kwargs_list:
+      related_manager.create(product=instance, **kwargs)
+
   def validate(self, data):
+    if self.instance is None and 'images' not in data:
+      raise serializers.ValidationError(
+        {'images': [_('At least 1 image is required.')]}
+      )
+
     tiers = self._parse_nested_list('pricing_tiers')
     if self.instance is None and not tiers:
       raise serializers.ValidationError(
@@ -194,19 +218,19 @@ class ProductSerializer(serializers.ModelSerializer):
         raise serializers.ValidationError(
           {'pricing_tiers': [_('Duplicate duration units are not allowed.')]}
         )
-      data['_pricing_tiers'] = self._validate_nested('pricing_tiers', PricingTierSerializer, tiers)
+      data['pricing_tiers_data'] = self._validate_nested('pricing_tiers', PricingTierSerializer, tiers)
 
     periods = self._parse_nested_list('unavailable_periods')
     if periods is not None:
-      data['_unavailable_periods'] = self._validate_nested(
+      data['unavailable_periods_data'] = self._validate_nested(
         'unavailable_periods', UnavailablePeriodSerializer, periods
       )
     return data
 
   def create(self, validated_data):
     images = validated_data.pop('images')
-    tiers = validated_data.pop('_pricing_tiers')
-    periods = validated_data.pop('_unavailable_periods', [])
+    tiers = validated_data.pop('pricing_tiers_data')
+    periods = validated_data.pop('unavailable_periods_data', [])
 
     with transaction.atomic():
       product = Product.objects.create(**validated_data)
@@ -220,8 +244,8 @@ class ProductSerializer(serializers.ModelSerializer):
 
   def update(self, instance, validated_data):
     images = validated_data.pop('images', None)
-    tiers = validated_data.pop('_pricing_tiers', None)
-    periods = validated_data.pop('_unavailable_periods', None)
+    tiers = validated_data.pop('pricing_tiers_data', None)
+    periods = validated_data.pop('unavailable_periods_data', None)
 
     with transaction.atomic():
       for attr, value in validated_data.items():
@@ -234,11 +258,7 @@ class ProductSerializer(serializers.ModelSerializer):
         for image in images:
           ProductImage.objects.create(product=instance, image=image)
       if tiers is not None:
-        instance.pricing_tiers.all().delete()
-        for tier_data in tiers:
-          PricingTier.objects.create(product=instance, **tier_data)
+        self._replace_related(instance, instance.pricing_tiers, tiers)
       if periods is not None:
-        instance.unavailable_periods.all().delete()
-        for period_data in periods:
-          UnavailablePeriod.objects.create(product=instance, **period_data)
+        self._replace_related(instance, instance.unavailable_periods, periods)
     return instance

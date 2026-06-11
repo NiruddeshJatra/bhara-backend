@@ -88,6 +88,24 @@ class ListingVisibilityTest(TestCase):
     response = self.client.get('/api/listings/my_products/', **auth_headers(self.owner))
     self.assertEqual(len(response.json()['data']['results']), 3)
 
+  def test_owner_cannot_retrieve_own_draft_via_detail(self):
+    """retrieve queryset filters to status=active — even owners get 404 on their drafts."""
+    response = self.client.get(f'/api/listings/{self.draft.id}/', **auth_headers(self.owner))
+    self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+  def test_views_count_increments_for_non_owner(self):
+    other = VerifiedUserFactory()
+    before = self.active.views_count
+    self.client.get(f'/api/listings/{self.active.id}/', **auth_headers(other))
+    self.active.refresh_from_db()
+    self.assertEqual(self.active.views_count, before + 1)
+
+  def test_views_count_not_incremented_for_owner(self):
+    before = self.active.views_count
+    self.client.get(f'/api/listings/{self.active.id}/', **auth_headers(self.owner))
+    self.active.refresh_from_db()
+    self.assertEqual(self.active.views_count, before)
+
 
 class ListingCreateTest(TestCase):
   """§3.2 create permission + §3.3 serializer validation."""

@@ -57,22 +57,20 @@ def _create_ephemeral_token(phone_number, purpose):
 
 def _decode_ephemeral_token(token, expected_purpose):
   """
-  Decodes and validates ephemeral token. Raises jwt exceptions on failure.
-  Rejects tokens whose jti has already been consumed (single-use).
+  Decodes and validates ephemeral token. Atomically reserves the jti via
+  cache.add — returns False if already set, preventing TOCTOU replay.
   Returns (phone_number, jti).
   """
   payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
   if payload.get('purpose') != expected_purpose:
     raise ValueError('Token purpose mismatch.')
   jti = payload.get('jti')
-  if not jti or cache.get(f'used_jti:{jti}'):
+  if not jti:
+    raise ValueError('Token missing jti.')
+  # cache.add is atomic: sets the key only if absent, returns False if already exists
+  if not cache.add(f'used_jti:{jti}', True, timeout=600):
     raise ValueError('Token already used.')
   return payload['phone_number'], jti
-
-
-def _mark_jti_used(jti):
-  """Consumes an ephemeral token's jti — kept for the token's max lifetime."""
-  cache.set(f'used_jti:{jti}', True, timeout=600)
 
 
 class OTPRateThrottle(AnonRateThrottle):
@@ -197,8 +195,6 @@ class SignupCompleteView(APIView):
       password=serializer.validated_data['password'],
       marketing_consent=serializer.validated_data.get('marketing_consent', False),
     )
-    _mark_jti_used(jti)
-
     access_token, refresh = _issue_tokens(user)
     response = success_response(
       {
@@ -350,7 +346,6 @@ class PasswordResetCompleteView(APIView):
 
     user.set_password(serializer.validated_data['password'])
     user.save(update_fields=['password'])
-    _mark_jti_used(jti)
 
     # Blacklist all existing refresh tokens for this user
     from rest_framework_simplejwt.token_blacklist.models import OutstandingToken

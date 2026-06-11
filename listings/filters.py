@@ -1,5 +1,5 @@
 from django.apps import apps
-from django.db.models import Q
+from django.db.models import Min, Q
 from django_filters import rest_framework as filters
 
 from listings.models import Product
@@ -67,9 +67,9 @@ class ProductFilter(filters.FilterSet):
 
   def filter_ordering(self, queryset, name, value):
     if value == 'price_asc':
-      return queryset.order_by('pricing_tiers__price')
+      return queryset.annotate(min_price=Min('pricing_tiers__price')).order_by('min_price', 'id')
     if value == 'price_desc':
-      return queryset.order_by('-pricing_tiers__price')
+      return queryset.annotate(min_price=Min('pricing_tiers__price')).order_by('-min_price', 'id')
     if value == 'rating':
       return queryset.order_by('-average_rating')
     if value == 'views':

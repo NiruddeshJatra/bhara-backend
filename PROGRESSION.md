@@ -48,3 +48,15 @@ Sequential history of every significant change. Read top-to-bottom for full pict
 - **`core/urls.py`**: wired `api/listings/` include.
 - **`listings/tests/`**: 19 tests — `ListingVisibilityTest` (draft/suspended visibility), `ListingCreateTest` (can_transact gating, image validation), `AvailabilityFilterTest`.
 - Total: 89 tests passing.
+
+---
+
+## Code Review Fixes
+**2026-06-11 — address 6 bugs/suggestions from post-merge review**
+
+- **`users/views.py`**: fixed TOCTOU race in ephemeral JTI check — replaced `cache.get() + cache.set()` with atomic `cache.add()` in `_decode_ephemeral_token`; removed now-redundant `_mark_jti_used`.
+- **`listings/serializers.py`**: `images` field set `required=False` (create still enforced in `validate()`); `_parse_nested_list` normalizes each string element in a list (multipart repeated keys); `_validate_nested` passes `context=self.context` to child serializers; renamed `_pricing_tiers`/`_unavailable_periods` → `pricing_tiers_data`/`unavailable_periods_data`; extracted `_replace_related` helper used in `update()`.
+- **`listings/filters.py`**: price ordering now uses `Min('pricing_tiers__price')` annotation + tie-break on `id` — avoids duplicate rows and unstable pagination from multi-tier products.
+- **`users/tests/test_views.py`**: 2 new tests — `test_attempt_counter_reset_after_success`, `test_attempt_counter_reset_on_new_otp`.
+- **`listings/tests/test_views.py`**: 3 new tests — owner retrieve 404 on own draft, views_count increments for non-owner, views_count unchanged for owner.
+- Total: 94 tests passing.
