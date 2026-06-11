@@ -604,13 +604,13 @@ class TestRentalAPITransitions(TestCase):
         stranger = RenterFactory()
         r = self.client.get('/api/rentals/my-rentals/', **auth_headers(stranger))
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(len(r.json()['data']), 0)
+        self.assertEqual(len(r.json()['data']['results']), 0)
 
     def test_my_rentals_returns_own(self):
         self._make_rental()
         r = self.client.get('/api/rentals/my-rentals/', **auth_headers(self.renter))
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(len(r.json()['data']), 1)
+        self.assertEqual(len(r.json()['data']['results']), 1)
 
 
 # ===========================================================================

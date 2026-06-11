@@ -135,7 +135,7 @@ class RentalCreateSerializer(serializers.Serializer):
 
         # Delegate to get_blocked_dates so availability rules live in one place (§4.6)
         from listings.services import get_blocked_dates
-        blocked = get_blocked_dates(product)
+        blocked = get_blocked_dates(product, start=data['start_date'], end=end_date)
         d = data['start_date']
         while d <= end_date:
             if d in blocked:

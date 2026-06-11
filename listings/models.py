@@ -48,6 +48,10 @@ class Product(models.Model):
     ordering = ['-created_at']
     verbose_name = _('Product')
     verbose_name_plural = _('Products')
+    indexes = [
+      # Main listing page: WHERE status='active' ORDER BY created_at DESC
+      models.Index(fields=['status', '-created_at'], name='product_status_created_idx'),
+    ]
 
   def __str__(self):
     return self.title
