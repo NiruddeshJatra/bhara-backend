@@ -28,7 +28,7 @@ class RentalRequestSMSTest(TestCase):
             product=self.product, duration_unit='day', price=500, max_period=30
         )
 
-    @patch('celery_tasks.rentals.send_rental_request_sms.delay')
+    @patch('rentals.serializers.send_rental_request_sms.delay')
     def test_task_enqueued_on_create_after_commit(self, mock_delay):
         with self.captureOnCommitCallbacks(execute=True):
             response = self.client.post(
@@ -48,7 +48,7 @@ class RentalRequestSMSTest(TestCase):
             self.product.owner.phone_number, 'A' * 30
         )
 
-    @patch('celery_tasks.rentals.send_rental_request_sms.delay')
+    @patch('rentals.serializers.send_rental_request_sms.delay')
     def test_task_not_enqueued_on_accept_or_reject(self, mock_delay):
         accept_rental = RentalFactory(status='pending')
         with self.captureOnCommitCallbacks(execute=True):
