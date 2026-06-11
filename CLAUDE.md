@@ -53,9 +53,21 @@ rentals/
 ├── urls.py              ← DefaultRouter at api/rentals/
 ├── admin.py             ← RentalAdmin; transition actions; PaymentRecord add-only inline (recorded_by auto-set)
 ├── migrations/
-└── tests/               ← 47 tests (transition matrix, double-booking, §5.3 guard, snapshot immutability)
+└── tests/               ← 54 tests (transition matrix, double-booking, §5.3 guard, snapshot, photos)
+reviews/
+├── models.py            ← Review (UUID pk, UniqueConstraint rental+reviewer); _recompute_ratings() on save
+├── serializers.py       ← ReviewCreateSerializer (server-derives direction/reviewee); ReviewSerializer
+├── views.py             ← ReviewViewSet — create/list/pending; list is AllowAny; pending requires auth
+├── urls.py              ← DefaultRouter at api/reviews/
+├── admin.py             ← ReviewAdmin; list+delete only; has_change_permission=False
+├── migrations/
+└── tests/               ← 21 tests (creation rules, aggregation math, list filtering, pending)
 celery_tasks/
 └── users.py             ← send_otp_task (async SMS delivery)
+docs/
+├── bhara_rebuild_spec.md     ← full rebuild spec (§1–§9)
+├── bhara_auth_instructions.md ← auth module spec (still authoritative for auth)
+└── INSTALLATION.md           ← setup instructions
 pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 ```
 
@@ -85,6 +97,10 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 | POST | `/api/rentals/{id}/reject/` | Owner | pending → rejected |
 | POST | `/api/rentals/{id}/cancel/` | Renter | → cancelled |
 | GET/POST | `/api/rentals/{id}/photos/` | Participant/Staff | Rental documentation photos |
+| POST | `/api/reviews/` | Auth | Submit review (direction + reviewee derived server-side) |
+| GET | `/api/reviews/?product={id}` | None | Public: renter_to_owner reviews for a product |
+| GET | `/api/reviews/?user={id}` | None | Public: reviews received by a user |
+| GET | `/api/reviews/pending/` | Auth | My completed rentals awaiting my review |
 
 ## Key Conventions
 
@@ -110,6 +126,9 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 - **Double-booking guard**: `pending → accepted` wraps in `transaction.atomic()` + `Product.objects.select_for_update()`. Overlapping accepted/in_progress rentals raise `TransitionError`; overlapping pending requests are auto-rejected with note 'Auto-rejected: dates were booked'.
 - **`has_completed_transactions()`**: uses `Q(renter=self) | Q(owner=self)` — Rental has no `user` field.
 - **`success_response` / `error_response` `data` arg**: uses `{} if data is None else data` — NOT `data or {}`. An empty list `[]` is a valid response body; falsy-coercion would silently replace it with `{}`.
+- **Review direction + reviewee**: always derived server-side in `ReviewCreateSerializer.validate()` from who the reviewer is. Client sends only `{rental_id, rating, comment}`.
+- **Review aggregation**: `Review._recompute_ratings()` runs on every `save()`. renter_to_owner only updates `product.average_rating`; all reviews update `reviewee.average_rating`. Both via `aggregate(Avg)` + `.update()` — atomic, no SELECT then SET.
+- **Spec files moved to `docs/`**: `bhara_rebuild_spec.md`, `bhara_auth_instructions.md`, `INSTALLATION.md` are in `docs/` not root.
 
 ## Settings Structure
 
@@ -121,21 +140,23 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 ## Running Tests
 
 ```bash
-pytest                        # all 148 tests
+pytest                        # all 169 tests
 pytest users/                 # 70 auth tests
 pytest listings/              # 19 listings tests
 pytest rentals/               # 54 rentals tests (matrix, double-booking, §5.3, snapshot, photos)
+pytest reviews/               # 21 reviews tests (creation rules, aggregation, list, pending)
 pytest -x -v                  # stop on first failure, verbose
 ```
 
 ## Spec
 
-Full rebuild spec in `bhara_rebuild_spec.md`. Sections implemented so far:
+Full rebuild spec in `docs/bhara_rebuild_spec.md`. Sections implemented so far:
 - §2 — core/responses.py extraction ✅
 - §3 — listings app (Product, images, pricing tiers, availability) ✅
 - §4 — rentals app (Rental model, state machine, endpoints, double-booking guard) ✅
 - §5 — PaymentRecord (append-only), settlement block in detail, §5.3 completion guard ✅
 - §6 — Django admin (RentalAdmin + ProductAdmin) ✅
+- §7 — reviews app (Review model, aggregation, 4 endpoints, admin) ✅
 - §9 — auth hardening (brute-force, SMS caps, lockout TTL, token rotation, ephemeral JTI) ✅
 
 ## Skills Active
