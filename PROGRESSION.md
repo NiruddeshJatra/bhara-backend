@@ -60,3 +60,19 @@ Sequential history of every significant change. Read top-to-bottom for full pict
 - **`users/tests/test_views.py`**: 2 new tests — `test_attempt_counter_reset_after_success`, `test_attempt_counter_reset_on_new_otp`.
 - **`listings/tests/test_views.py`**: 3 new tests — owner retrieve 404 on own draft, views_count increments for non-owner, views_count unchanged for owner.
 - Total: 94 tests passing.
+
+---
+
+## Phase 3 — Rentals App (§4–§6)
+**2026-06-11 — Rental state machine, endpoints, PaymentRecord, completion guard, admin**
+
+- **`rentals/state_machine.py`** (NEW): `ALLOWED_TRANSITIONS` dict is single source of truth for all status edges. `TransitionError`, `get_actor_role`, `role_matches` helpers. Views never assign `rental.status` directly.
+- **`rentals/models.py`** (NEW): `Rental` with frozen pricing snapshot fields (`unit_price`, `base_cost`, `service_fee`, `owner_payout`, `security_deposit` — all set at create, never recomputed). `transition(new_status, actor, note)` method enforces the table + per-edge guards: pending→accepted uses `select_for_update` inside `atomic()` to prevent double-booking and auto-rejects overlapping pending requests; accepted→cancelled(renter) blocks if `start_date ≤ today`; in_progress→completed blocked by §5.3 payment completeness check with specific error per missing piece. `RentalPhoto` adds `uploaded_by` FK. `PaymentRecord` append-only with 6 record types.
+- **`rentals/serializers.py`** (NEW): `RentalCreateSerializer` validates all §4.4 create guards (can_transact, renter≠owner, active product, tier exists, duration≤max, start≥today, no UnavailablePeriod overlap, no duplicate request). `RentalDetailSerializer` nests `payment_records` + computed `settlement` block `{rent_paid, deposit_held, deposit_returned, owner_paid}`.
+- **`rentals/views.py`** (NEW): `RentalViewSet` — 8 endpoints per §4.5. `get_queryset` always scoped to `Q(renter=user) | Q(owner=user)` (staff see all). No complete/in_progress public endpoints — admin-only transitions.
+- **`rentals/admin.py`** (NEW): `RentalAdmin` — colored status column, settlement summary, all pricing fields readonly, `PaymentRecord` inline (add-only; `save_formset` auto-sets `recorded_by=request.user`), 3 transition actions via `rental.transition()`. `RentalPhoto` readonly inline.
+- **`listings/admin.py`** (NEW): `ProductAdmin` with suspend/re-activate actions; image thumbnails + pricing tier inlines.
+- **`listings/services.py`** (NEW): `get_blocked_dates(product)` returns set of date objects from owner UnavailablePeriods + accepted/in_progress rental date ranges.
+- **`users/models.py`**: fixed `has_completed_transactions()` — was querying `user=self` (no such field); now uses `Q(renter=self) | Q(owner=self)`.
+- **`pyrightconfig.json`** (NEW): `venvPath` + `venv` keys point Pyright/Pylance to the project venv so import errors from `rest_framework` etc. are resolved.
+- Total: 141 tests passing (47 new — exhaustive transition matrix, double-booking + concurrent guard, §5.3 guard per missing piece, pricing snapshot immutability).

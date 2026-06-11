@@ -152,7 +152,9 @@ class User(AbstractBaseUser, PermissionsMixin):
     try:
         from rentals.models import Rental
         return Rental.objects.filter(
-            user=self, status='completed'
+            status='completed'
+        ).filter(
+            models.Q(renter=self) | models.Q(owner=self)
         ).exists()
     except ModuleNotFoundError:
         return False
