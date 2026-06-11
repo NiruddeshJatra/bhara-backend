@@ -48,7 +48,10 @@ class ReviewCreateSerializer(serializers.Serializer):
         )
         if not completion_entry:
             raise serializers.ValidationError('Rental has no completion record.')
-        completed_at = datetime.fromisoformat(completion_entry['timestamp'])
+        try:
+            completed_at = datetime.fromisoformat(completion_entry['timestamp'])
+        except (ValueError, KeyError, TypeError):
+            raise serializers.ValidationError('Rental has a malformed completion record.')
         if completed_at.tzinfo is None:
             completed_at = completed_at.replace(tzinfo=dt_tz.utc)
         if timezone.now() - completed_at > timedelta(days=30):

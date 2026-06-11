@@ -101,3 +101,12 @@ Sequential history of every significant change. Read top-to-bottom for full pict
 - **`docs/`** (NEW folder): moved `bhara_rebuild_spec.md`, `bhara_auth_instructions.md`, `INSTALLATION.md` out of root.
 - CLAUDE.md updated: endpoints table, conventions, spec path, test counts.
 - Total: 169 tests passing (21 new).
+
+---
+
+## Code Review Fixes — Reviews
+**2026-06-11 — address 4 code review comments on reviews app**
+
+- **`reviews/models.py`**: moved `from listings.models import Product` to module-level import; split `_recompute_ratings` into `_recompute_product_rating` + `_recompute_reviewee_rating` helpers for clarity.
+- **`reviews/serializers.py`**: wrapped `datetime.fromisoformat(completion_entry['timestamp'])` in `try/except (ValueError, KeyError, TypeError)` — malformed status_history now raises `ValidationError` instead of 500.
+- **`reviews/tests/test_reviews.py`**: `make_completed_rental` adds 1-hour buffer to avoid wall-clock drift at the 30-day boundary; `test_30_days_exactly_still_allowed` now uses `completed_days_ago=30` (was 29) to actually exercise the boundary; `test_pending_excludes_non_completed_rentals` captures the accepted rental and asserts `str(accepted.pk) not in ids` (was always-passing `RentalFactory.__name__` check).
