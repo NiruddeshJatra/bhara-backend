@@ -4,7 +4,11 @@ from decimal import Decimal
 from django.conf import settings
 from rest_framework import serializers
 
+from django.db import transaction
+
+from celery_tasks.rentals import send_rental_request_sms
 from listings.models import PricingTier, Product
+from listings.services import get_blocked_dates
 from rentals.models import (
     PURPOSE_CHOICES,
     DURATION_UNIT_CHOICES,
@@ -39,10 +43,11 @@ class RentalPhotoSerializer(serializers.ModelSerializer):
 def _public_party(user):
     """Minimal public info about a rental party — never includes the phone
     number (counter-disintermediation: contact stays on-platform)."""
+    rating = user.average_rating
     return {
         'full_name': user.full_name,
         'trust_level': user.trust_level,
-        'average_rating': str(user.average_rating),
+        'average_rating': str(rating) if rating is not None else None,
     }
 
 
@@ -155,8 +160,6 @@ class RentalCreateSerializer(serializers.Serializer):
 
         end_date = compute_end_date(data['start_date'], data['duration'], duration_unit)
 
-        # Delegate to get_blocked_dates so availability rules live in one place (§4.6)
-        from listings.services import get_blocked_dates
         blocked = get_blocked_dates(product, start=data['start_date'], end=end_date)
         d = data['start_date']
         while d <= end_date:
@@ -181,10 +184,6 @@ class RentalCreateSerializer(serializers.Serializer):
         return data
 
     def create(self, validated_data):
-        from django.db import transaction
-
-        from celery_tasks.rentals import send_rental_request_sms
-
         tier = validated_data.pop('_tier')
         renter = self.context['request'].user
         product = validated_data['product']
