@@ -1,3 +1,4 @@
+from django.core.exceptions import ValidationError as DjValidationError
 from django.db.models import Q
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -5,7 +6,7 @@ from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 
 from core.responses import success_response, error_response
-from rentals.models import Rental, RentalPhoto
+from rentals.models import Rental
 from rentals.serializers import (
     RentalCreateSerializer,
     RentalDetailSerializer,
@@ -18,6 +19,12 @@ from rentals.state_machine import TransitionError
 class RentalViewSet(viewsets.GenericViewSet):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+
+    def handle_exception(self, exc):
+        """Map DoesNotExist and invalid-UUID errors to 404 instead of 500."""
+        if isinstance(exc, (Rental.DoesNotExist, DjValidationError, ValueError)):
+            return error_response('Rental not found.', status_code=status.HTTP_404_NOT_FOUND)
+        return super().handle_exception(exc)
 
     def get_queryset(self):
         user = self.request.user
@@ -32,8 +39,7 @@ class RentalViewSet(viewsets.GenericViewSet):
         )
 
     def get_object(self):
-        queryset = self.get_queryset()
-        obj = queryset.get(pk=self.kwargs['pk'])
+        obj = self.get_queryset().get(pk=self.kwargs['pk'])
         self.check_object_permissions(self.request, obj)
         return obj
 
@@ -55,76 +61,52 @@ class RentalViewSet(viewsets.GenericViewSet):
         )
 
     def retrieve(self, request, pk=None):
-        try:
-            rental = self.get_object()
-        except Rental.DoesNotExist:
-            return error_response('Rental not found.', status_code=status.HTTP_404_NOT_FOUND)
+        rental = self.get_object()
         return success_response(RentalDetailSerializer(rental).data)
 
     # ------------------------------------------------------------------
-    # List actions
+    # List actions — reuse get_queryset for consistent scoping + prefetch
     # ------------------------------------------------------------------
 
     @action(detail=False, methods=['get'], url_path='my-rentals')
     def my_rentals(self, request):
-        qs = Rental.objects.filter(renter=request.user).select_related(
-            'product', 'owner', 'renter'
-        )
+        qs = self.get_queryset().filter(renter=request.user)
         return success_response(RentalListSerializer(qs, many=True).data)
 
     @action(detail=False, methods=['get'], url_path='my-listings-rentals')
     def my_listings_rentals(self, request):
-        qs = Rental.objects.filter(owner=request.user).select_related(
-            'product', 'owner', 'renter'
-        )
+        qs = self.get_queryset().filter(owner=request.user)
         return success_response(RentalListSerializer(qs, many=True).data)
 
     # ------------------------------------------------------------------
     # Transition actions (views never set rental.status directly — §4.2)
     # ------------------------------------------------------------------
 
-    @action(detail=True, methods=['post'])
-    def accept(self, request, pk=None):
+    def _perform_transition(self, rental, new_status, user, note, success_message):
         try:
-            rental = self.get_object()
-        except Rental.DoesNotExist:
-            return error_response('Rental not found.', status_code=status.HTTP_404_NOT_FOUND)
-        try:
-            rental.transition('accepted', request.user)
+            rental.transition(new_status, user, note=note)
         except TransitionError as e:
             return error_response(str(e), status_code=status.HTTP_400_BAD_REQUEST)
-        return success_response(
-            RentalDetailSerializer(rental).data, 'Rental accepted.'
+        return success_response(RentalDetailSerializer(rental).data, success_message)
+
+    @action(detail=True, methods=['post'])
+    def accept(self, request, pk=None):
+        return self._perform_transition(
+            self.get_object(), 'accepted', request.user, '', 'Rental accepted.'
         )
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
-        try:
-            rental = self.get_object()
-        except Rental.DoesNotExist:
-            return error_response('Rental not found.', status_code=status.HTTP_404_NOT_FOUND)
-        note = request.data.get('note', '')
-        try:
-            rental.transition('rejected', request.user, note=note)
-        except TransitionError as e:
-            return error_response(str(e), status_code=status.HTTP_400_BAD_REQUEST)
-        return success_response(
-            RentalDetailSerializer(rental).data, 'Rental rejected.'
+        return self._perform_transition(
+            self.get_object(), 'rejected', request.user,
+            request.data.get('note', ''), 'Rental rejected.',
         )
 
     @action(detail=True, methods=['post'])
     def cancel(self, request, pk=None):
-        try:
-            rental = self.get_object()
-        except Rental.DoesNotExist:
-            return error_response('Rental not found.', status_code=status.HTTP_404_NOT_FOUND)
-        note = request.data.get('note', '')
-        try:
-            rental.transition('cancelled', request.user, note=note)
-        except TransitionError as e:
-            return error_response(str(e), status_code=status.HTTP_400_BAD_REQUEST)
-        return success_response(
-            RentalDetailSerializer(rental).data, 'Rental cancelled.'
+        return self._perform_transition(
+            self.get_object(), 'cancelled', request.user,
+            request.data.get('note', ''), 'Rental cancelled.',
         )
 
     # ------------------------------------------------------------------
@@ -133,39 +115,32 @@ class RentalViewSet(viewsets.GenericViewSet):
 
     @action(detail=True, methods=['get', 'post'], url_path='photos')
     def photos(self, request, pk=None):
-        try:
-            rental = self.get_object()
-        except Rental.DoesNotExist:
-            return error_response('Rental not found.', status_code=status.HTTP_404_NOT_FOUND)
-
+        rental = self.get_object()
         if request.method == 'GET':
-            serializer = RentalPhotoSerializer(
-                rental.photos.all(), many=True, context={'request': request}
+            return success_response(
+                RentalPhotoSerializer(
+                    rental.photos.all(), many=True, context={'request': request}
+                ).data
             )
-            return success_response(serializer.data)
+        return self._handle_photo_upload(request, rental)
 
-        # POST — upload photo
+    def _handle_photo_upload(self, request, rental):
         if rental.status not in ('accepted', 'in_progress', 'completed'):
             return error_response(
                 'Photos can only be uploaded when rental is accepted, in_progress, or completed.',
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-        serializer = RentalPhotoSerializer(
-            data=request.data, context={'request': request}
-        )
+        # Enforce size limit before validation to avoid storing oversized files
+        uploaded = request.FILES.get('photo')
+        if uploaded and uploaded.size > 5 * 1024 * 1024:
+            return error_response(message='Photo must be ≤ 5 MB.', status_code=status.HTTP_400_BAD_REQUEST)
+
+        serializer = RentalPhotoSerializer(data=request.data, context={'request': request})
         if not serializer.is_valid():
             return error_response(serializer.errors, 'Validation failed.')
 
         photo = serializer.save(rental=rental, uploaded_by=request.user)
-
-        # 5 MB limit enforced here (serializer field validates extension; size checked below)
-        if photo.photo.size > 5 * 1024 * 1024:
-            photo.delete()
-            return error_response(
-                'Photo must be ≤ 5 MB.', status_code=status.HTTP_400_BAD_REQUEST
-            )
-
         return success_response(
             RentalPhotoSerializer(photo, context={'request': request}).data,
             'Photo uploaded.',

@@ -1,4 +1,5 @@
 import json
+from decimal import Decimal
 
 from django.contrib import admin
 from django.utils.html import format_html
@@ -106,11 +107,12 @@ class RentalAdmin(admin.ModelAdmin):
         records = list(obj.payment_records.all())
 
         def total(rtype):
-            return sum(r.amount for r in records if r.record_type == rtype)
+            return sum(
+                (r.amount for r in records if r.record_type == rtype),
+                Decimal('0'),
+            )
 
-        rent = total('rent_collected')
-        payout = total('owner_payout')
-        return f'Rent ৳{rent} | Payout ৳{payout}'
+        return f'Rent ৳{total("rent_collected")} | Payout ৳{total("owner_payout")}'
     settlement_summary.short_description = 'Settlement'
 
     def pretty_history(self, obj):
@@ -133,29 +135,43 @@ class RentalAdmin(admin.ModelAdmin):
     # Transition actions — implemented via Rental.transition() (§6)
     # ------------------------------------------------------------------
 
-    def mark_in_progress(self, request, queryset):
-        for rental in queryset.filter(status='accepted'):
+    def _bulk_transition(self, request, queryset, *, from_statuses, to_status, note, msg):
+        status_filter = (
+            {'status': from_statuses}
+            if isinstance(from_statuses, str)
+            else {'status__in': from_statuses}
+        )
+        for rental in queryset.filter(**status_filter):
+            pk_short = str(rental.pk)[:8]
             try:
-                rental.transition('in_progress', request.user, 'Marked in_progress via admin')
-                self.message_user(request, f'Rental {str(rental.pk)[:8]} marked in_progress.')
+                rental.transition(to_status, request.user, note)
+                self.message_user(request, msg.format(pk=pk_short))
             except TransitionError as e:
-                self.message_user(request, f'Rental {str(rental.pk)[:8]}: {e}', level='ERROR')
+                self.message_user(request, f'Rental {pk_short}: {e}', level='ERROR')
+
+    def mark_in_progress(self, request, queryset):
+        self._bulk_transition(
+            request, queryset,
+            from_statuses='accepted', to_status='in_progress',
+            note='Marked in_progress via admin',
+            msg='Rental {pk} marked in_progress.',
+        )
     mark_in_progress.short_description = 'Mark item handed to renter (in_progress)'
 
     def mark_completed(self, request, queryset):
-        for rental in queryset.filter(status='in_progress'):
-            try:
-                rental.transition('completed', request.user, 'Marked completed via admin')
-                self.message_user(request, f'Rental {str(rental.pk)[:8]} completed.')
-            except TransitionError as e:
-                self.message_user(request, f'Rental {str(rental.pk)[:8]}: {e}', level='ERROR')
+        self._bulk_transition(
+            request, queryset,
+            from_statuses='in_progress', to_status='completed',
+            note='Marked completed via admin',
+            msg='Rental {pk} completed.',
+        )
     mark_completed.short_description = 'Mark rental completed (settled)'
 
     def cancel_rental(self, request, queryset):
-        for rental in queryset.filter(status__in=['pending', 'accepted']):
-            try:
-                rental.transition('cancelled', request.user, 'Cancelled via admin')
-                self.message_user(request, f'Rental {str(rental.pk)[:8]} cancelled.')
-            except TransitionError as e:
-                self.message_user(request, f'Rental {str(rental.pk)[:8]}: {e}', level='ERROR')
+        self._bulk_transition(
+            request, queryset,
+            from_statuses=['pending', 'accepted'], to_status='cancelled',
+            note='Cancelled via admin',
+            msg='Rental {pk} cancelled.',
+        )
     cancel_rental.short_description = 'Cancel rental (staff)'

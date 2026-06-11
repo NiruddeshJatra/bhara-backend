@@ -72,7 +72,19 @@ Sequential history of every significant change. Read top-to-bottom for full pict
 - **`rentals/views.py`** (NEW): `RentalViewSet` — 8 endpoints per §4.5. `get_queryset` always scoped to `Q(renter=user) | Q(owner=user)` (staff see all). No complete/in_progress public endpoints — admin-only transitions.
 - **`rentals/admin.py`** (NEW): `RentalAdmin` — colored status column, settlement summary, all pricing fields readonly, `PaymentRecord` inline (add-only; `save_formset` auto-sets `recorded_by=request.user`), 3 transition actions via `rental.transition()`. `RentalPhoto` readonly inline.
 - **`listings/admin.py`** (NEW): `ProductAdmin` with suspend/re-activate actions; image thumbnails + pricing tier inlines.
-- **`listings/services.py`** (NEW): `get_blocked_dates(product)` returns set of date objects from owner UnavailablePeriods + accepted/in_progress rental date ranges.
+- **`listings/services.py`** (NEW): `get_blocked_dates(product)` returns a set of date objects from owner UnavailablePeriods + accepted/in_progress rental date ranges.
 - **`users/models.py`**: fixed `has_completed_transactions()` — was querying `user=self` (no such field); now uses `Q(renter=self) | Q(owner=self)`.
 - **`pyrightconfig.json`** (NEW): `venvPath` + `venv` keys point Pyright/Pylance to the project venv so import errors from `rest_framework` etc. are resolved.
 - Total: 141 tests passing (47 new — exhaustive transition matrix, double-booking + concurrent guard, §5.3 guard per missing piece, pricing snapshot immutability).
+
+---
+
+## Code Review Fixes — Rentals
+**2026-06-11 — address 9 individual + 2 overall code review comments on rentals app**
+
+- **`core/responses.py`**: `data or {}` → `{} if data is None else data` in both helpers — falsy coercion was silently replacing empty lists `[]` with `{}`, breaking GET photos endpoint.
+- **`rentals/views.py`**: extracted `_perform_transition` helper (accept/reject/cancel now one-liners); extracted `_handle_photo_upload` with size-before-save guard (5 MB cap checked before serializer to avoid storing oversized files); `my_rentals`/`my_listings_rentals` reuse `get_queryset()` for consistent scoping + prefetch; `handle_exception` maps DoesNotExist/ValueError/DjValidationError → 404.
+- **`rentals/admin.py`**: extracted `_bulk_transition` helper used by all 3 action methods; `settlement_summary` + `_guard_complete` use `sum(..., Decimal('0'))` start value.
+- **`rentals/serializers.py`**: availability check delegates to `get_blocked_dates(product)` (§4.6 single source); `get_settlement` also uses `Decimal('0')` start.
+- **`rentals/tests/test_rentals.py`**: added `TestRentalAPIPhotos` (5 tests: participant access, stranger 404, upload for accepted/in_progress, blocked for pending, oversized rejected before save); added `test_unknown_unit_raises` to `TestComputeEndDate`.
+- Total: 148 tests passing (7 new).
