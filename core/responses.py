@@ -6,7 +6,7 @@ def success_response(data=None, message='', status_code=status.HTTP_200_OK):
   return Response({
     'success': True,
     'message': message,
-    'data': data or {},
+    'data': {} if data is None else data,
   }, status=status_code)
 
 
@@ -14,5 +14,5 @@ def error_response(data=None, message='', status_code=status.HTTP_400_BAD_REQUES
   return Response({
     'success': False,
     'message': message,
-    'data': data or {},
+    'data': {} if data is None else data,
   }, status=status_code)

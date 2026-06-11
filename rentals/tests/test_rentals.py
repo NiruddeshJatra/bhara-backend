@@ -9,13 +9,15 @@ Plus view integration tests for the full API lifecycle.
 import itertools
 from datetime import date, timedelta
 from decimal import Decimal
+from io import BytesIO
 
-import pytest
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
+from PIL import Image
 from rest_framework_simplejwt.tokens import RefreshToken
 
 from listings.tests.factories import PricingTierFactory, ProductFactory
-from rentals.models import Rental, compute_end_date
+from rentals.models import Rental, RentalPhoto, compute_end_date
 from rentals.state_machine import (
     ALLOWED_TRANSITIONS,
     ALL_STATUSES,
@@ -637,3 +639,95 @@ class TestComputeEndDate(TestCase):
     def test_months_cross_year(self):
         d = date(2024, 11, 30)
         self.assertEqual(compute_end_date(d, 3, 'month'), date(2025, 2, 28))
+
+    def test_unknown_unit_raises(self):
+        with self.assertRaises(ValueError):
+            compute_end_date(date(2024, 1, 1), 1, 'hour')
+
+
+# ===========================================================================
+# 7. Photos endpoint
+# ===========================================================================
+
+def make_photo_file(name='photo.jpg', size=(100, 100)):
+    img = Image.new('RGB', size, 'blue')
+    buf = BytesIO()
+    img.save(buf, format='JPEG')
+    buf.seek(0)
+    return SimpleUploadedFile(name, buf.read(), content_type='image/jpeg')
+
+
+class TestRentalAPIPhotos(TestCase):
+
+    def setUp(self):
+        self.product = ProductFactory()
+        self.owner = self.product.owner
+        PricingTierFactory(product=self.product, duration_unit='day', price=500, max_period=30)
+        self.rental = RentalFactory(
+            product=self.product,
+            owner=self.owner,
+            start_date=date.today() + timedelta(days=10),
+            end_date=date.today() + timedelta(days=13),
+            status='accepted',
+        )
+        self.renter = self.rental.renter
+        self.url = f'/api/rentals/{self.rental.pk}/photos/'
+
+    def test_get_photos_returns_list_for_participant(self):
+        r = self.client.get(self.url, **auth_headers(self.renter))
+        self.assertEqual(r.status_code, 200)
+        self.assertIsInstance(r.json()['data'], list)
+
+    def test_get_photos_denied_for_stranger(self):
+        from users.tests.factories import VerifiedUserFactory
+        stranger = VerifiedUserFactory()
+        r = self.client.get(self.url, **auth_headers(stranger))
+        self.assertEqual(r.status_code, 404)
+
+    def test_post_photo_succeeds_for_accepted(self):
+        r = self.client.post(
+            self.url,
+            {'photo': make_photo_file(), 'photo_type': 'pre_rental'},
+            **auth_headers(self.renter),
+        )
+        self.assertIn(r.status_code, (200, 201))
+        self.assertEqual(RentalPhoto.objects.filter(rental=self.rental).count(), 1)
+
+    def test_post_photo_succeeds_for_in_progress(self):
+        self.rental.status = 'in_progress'
+        self.rental.save(update_fields=['status'])
+        r = self.client.post(
+            self.url,
+            {'photo': make_photo_file(), 'photo_type': 'post_rental'},
+            **auth_headers(self.renter),
+        )
+        self.assertIn(r.status_code, (200, 201))
+
+    def test_post_photo_blocked_for_pending(self):
+        self.rental.status = 'pending'
+        self.rental.save(update_fields=['status'])
+        before = RentalPhoto.objects.filter(rental=self.rental).count()
+        r = self.client.post(
+            self.url,
+            {'photo': make_photo_file(), 'photo_type': 'pre_rental'},
+            **auth_headers(self.renter),
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertEqual(RentalPhoto.objects.filter(rental=self.rental).count(), before)
+
+    def test_post_photo_oversized_rejected_before_save(self):
+        """Size check fires before Pillow validation — no DB row created."""
+        oversized = SimpleUploadedFile(
+            'big.jpg',
+            b'x' * (5 * 1024 * 1024 + 1),
+            content_type='image/jpeg',
+        )
+        before = RentalPhoto.objects.filter(rental=self.rental).count()
+        r = self.client.post(
+            self.url,
+            {'photo': oversized, 'photo_type': 'pre_rental'},
+            **auth_headers(self.renter),
+        )
+        self.assertEqual(r.status_code, 400)
+        self.assertIn('5 MB', r.json()['message'])
+        self.assertEqual(RentalPhoto.objects.filter(rental=self.rental).count(), before)

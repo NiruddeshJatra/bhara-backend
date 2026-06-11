@@ -40,7 +40,7 @@ listings/
 ├── constants.py         ← CATEGORY_CHOICES, STATUS_CHOICES = [draft, active, suspended]
 ├── serializers.py       ← image compression in validate_images() (OUTSIDE transaction)
 ├── filters.py           ← ProductFilter; availability filter via Q-exclude (incl. accepted/in_progress rentals)
-├── services.py          ← get_blocked_dates(product) → set of date — owner periods + rental-occupied dates (§4.6)
+├── services.py          ← get_blocked_dates(product) → a set of dates — owner periods + rental-occupied dates (§4.6)
 ├── admin.py             ← ProductAdmin; suspend/re-activate actions; image + pricing tier inlines
 ├── views.py             ← ProductViewSet; no caching; F() for views_count
 ├── urls.py              ← DefaultRouter at api/listings/
@@ -109,6 +109,7 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 - **§5.3 completion guard**: `in_progress → completed` blocked unless rent_collected ≥ base_cost, deposit fully settled (collected == returned + withheld), and owner_payout record present. Each missing piece raises `TransitionError` with a specific message.
 - **Double-booking guard**: `pending → accepted` wraps in `transaction.atomic()` + `Product.objects.select_for_update()`. Overlapping accepted/in_progress rentals raise `TransitionError`; overlapping pending requests are auto-rejected with note 'Auto-rejected: dates were booked'.
 - **`has_completed_transactions()`**: uses `Q(renter=self) | Q(owner=self)` — Rental has no `user` field.
+- **`success_response` / `error_response` `data` arg**: uses `{} if data is None else data` — NOT `data or {}`. An empty list `[]` is a valid response body; falsy-coercion would silently replace it with `{}`.
 
 ## Settings Structure
 
@@ -120,10 +121,10 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 ## Running Tests
 
 ```bash
-pytest                        # all 141 tests
+pytest                        # all 148 tests
 pytest users/                 # 70 auth tests
 pytest listings/              # 19 listings tests
-pytest rentals/               # 47 rentals tests (matrix, double-booking, §5.3, snapshot)
+pytest rentals/               # 54 rentals tests (matrix, double-booking, §5.3, snapshot, photos)
 pytest -x -v                  # stop on first failure, verbose
 ```
 

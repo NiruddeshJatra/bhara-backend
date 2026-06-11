@@ -1,8 +1,7 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.conf import settings
-from django.db.models import Q
 from rest_framework import serializers
 
 from listings.models import PricingTier, Product
@@ -76,7 +75,10 @@ class RentalDetailSerializer(serializers.ModelSerializer):
         records = list(obj.payment_records.all())
 
         def total(record_type):
-            return sum(r.amount for r in records if r.record_type == record_type)
+            return sum(
+                (r.amount for r in records if r.record_type == record_type),
+                Decimal('0'),
+            )
 
         return {
             'rent_paid': total('rent_collected'),
@@ -131,15 +133,16 @@ class RentalCreateSerializer(serializers.Serializer):
 
         end_date = compute_end_date(data['start_date'], data['duration'], duration_unit)
 
-        # Check owner-declared unavailable periods
-        has_blocked = product.unavailable_periods.filter(
-            Q(is_range=False, date__gte=data['start_date'], date__lte=end_date)
-            | Q(is_range=True, range_start__lte=end_date, range_end__gte=data['start_date'])
-        ).exists()
-        if has_blocked:
-            raise serializers.ValidationError(
-                'Selected dates overlap with an owner-declared unavailable period.'
-            )
+        # Delegate to get_blocked_dates so availability rules live in one place (§4.6)
+        from listings.services import get_blocked_dates
+        blocked = get_blocked_dates(product)
+        d = data['start_date']
+        while d <= end_date:
+            if d in blocked:
+                raise serializers.ValidationError(
+                    'Selected dates overlap with an unavailable period.'
+                )
+            d += timedelta(days=1)
 
         # No duplicate active request from this renter for this product
         if Rental.objects.filter(

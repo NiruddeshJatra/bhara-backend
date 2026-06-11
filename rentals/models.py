@@ -208,7 +208,10 @@ class Rental(models.Model):
         records = list(self.payment_records.all())
 
         def total(record_type):
-            return sum(r.amount for r in records if r.record_type == record_type)
+            return sum(
+                (r.amount for r in records if r.record_type == record_type),
+                Decimal('0'),
+            )
 
         rent_collected = total('rent_collected')
         if rent_collected < self.base_cost:
