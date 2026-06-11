@@ -46,6 +46,10 @@ class Review(models.Model):
                 fields=['rental', 'reviewer'], name='one_review_per_party'
             )
         ]
+        indexes = [
+            # Public product review list + product rating recompute
+            models.Index(fields=['product', 'direction'], name='review_product_dir_idx'),
+        ]
 
     def __str__(self):
         return f'{self.reviewer} → {self.reviewee} ({self.rating}★)'

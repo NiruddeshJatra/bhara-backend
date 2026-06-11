@@ -6,7 +6,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
 from django.core.cache import cache
 from django.conf import settings
-from django.db import transaction
+from django.db import IntegrityError, transaction
 import jwt
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -78,9 +78,23 @@ class OTPRateThrottle(AnonRateThrottle):
     rate = '3/minute' # Max 3 OTP requests per minute per IP
 
 
+class OTPDailyRateThrottle(AnonRateThrottle):
+    # 3/min alone allows 4,320 SMS/day from one IP — a direct billing attack.
+    # Daily cap bounds the worst-case SMS spend per source IP.
+    scope = 'otp_request_day'
+    rate = '20/day'
+
+
 class OTPVerifyRateThrottle(AnonRateThrottle):
     scope = 'otp_verify'
     rate = '10/minute' # Max 10 OTP verify attempts per minute per IP
+
+
+class LoginRateThrottle(AnonRateThrottle):
+    # Per-phone lockout alone lets one IP spray passwords across many phones
+    # (and deliberately lock victims out). IP throttle bounds both.
+    scope = 'login'
+    rate = '10/minute'
 
 
 def _check_sms_caps(phone):
@@ -106,7 +120,7 @@ def _record_sms_sent(phone):
 
 class OTPRequestView(APIView):
   permission_classes = [AllowAny]
-  throttle_classes = [OTPRateThrottle]
+  throttle_classes = [OTPRateThrottle, OTPDailyRateThrottle]
 
   def post(self, request):
     serializer = user_serializers.OTPRequestSerializer(data=request.data)
@@ -189,12 +203,20 @@ class SignupCompleteView(APIView):
         'Registration failed.'
       )
 
-    user = User.objects.create_user(
-      phone_number=phone_number,
-      full_name=serializer.validated_data['full_name'],
-      password=serializer.validated_data['password'],
-      marketing_consent=serializer.validated_data.get('marketing_consent', False),
-    )
+    try:
+      user = User.objects.create_user(
+        phone_number=phone_number,
+        full_name=serializer.validated_data['full_name'],
+        password=serializer.validated_data['password'],
+        marketing_consent=serializer.validated_data.get('marketing_consent', False),
+      )
+    except IntegrityError:
+      # TOCTOU: concurrent signup won between exists() and create_user —
+      # the unique constraint is the real guard; return 400, not 500
+      return error_response(
+        {'phone_number': ['An account with this phone number already exists.']},
+        'Registration failed.'
+      )
     access_token, refresh = _issue_tokens(user)
     response = success_response(
       {
@@ -216,6 +238,7 @@ class SignupCompleteView(APIView):
 
 class LoginView(APIView):
   permission_classes = [AllowAny]
+  throttle_classes = [LoginRateThrottle]
 
   def post(self, request):
     serializer = user_serializers.LoginSerializer(data=request.data)

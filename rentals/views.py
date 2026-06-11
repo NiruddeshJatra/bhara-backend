@@ -5,6 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import IsAuthenticated
 
+from core.pagination import StandardResultsSetPagination, paginated_success_response
 from core.responses import success_response, error_response
 from rentals.models import Rental
 from rentals.serializers import (
@@ -19,6 +20,7 @@ from rentals.state_machine import TransitionError
 class RentalViewSet(viewsets.GenericViewSet):
     permission_classes = [IsAuthenticated]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
+    pagination_class = StandardResultsSetPagination
 
     def handle_exception(self, exc):
         """Map DoesNotExist and invalid-UUID errors to 404 instead of 500."""
@@ -29,14 +31,16 @@ class RentalViewSet(viewsets.GenericViewSet):
     def get_queryset(self):
         user = self.request.user
         if user.is_staff:
-            return Rental.objects.select_related(
-                'product', 'owner', 'renter'
-            ).prefetch_related('payment_records', 'photos')
-        return Rental.objects.filter(
-            Q(renter=user) | Q(owner=user)
-        ).select_related('product', 'owner', 'renter').prefetch_related(
-            'payment_records', 'photos'
-        )
+            qs = Rental.objects.select_related('product', 'owner', 'renter')
+        else:
+            qs = Rental.objects.filter(
+                Q(renter=user) | Q(owner=user)
+            ).select_related('product', 'owner', 'renter')
+        # Only the detail serializer reads payment_records; list endpoints
+        # would prefetch (and discard) every payment row otherwise
+        if self.action == 'retrieve':
+            qs = qs.prefetch_related('payment_records')
+        return qs
 
     def get_object(self):
         obj = self.get_queryset().get(pk=self.kwargs['pk'])
@@ -71,12 +75,12 @@ class RentalViewSet(viewsets.GenericViewSet):
     @action(detail=False, methods=['get'], url_path='my-rentals')
     def my_rentals(self, request):
         qs = self.get_queryset().filter(renter=request.user)
-        return success_response(RentalListSerializer(qs, many=True).data)
+        return paginated_success_response(self, qs, RentalListSerializer)
 
     @action(detail=False, methods=['get'], url_path='my-listings-rentals')
     def my_listings_rentals(self, request):
         qs = self.get_queryset().filter(owner=request.user)
-        return success_response(RentalListSerializer(qs, many=True).data)
+        return paginated_success_response(self, qs, RentalListSerializer)
 
     # ------------------------------------------------------------------
     # Transition actions (views never set rental.status directly — §4.2)

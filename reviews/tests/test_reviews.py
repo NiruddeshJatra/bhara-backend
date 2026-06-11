@@ -238,7 +238,7 @@ class TestReviewListEndpoints(TestCase):
     def test_product_list_only_renter_to_owner(self):
         r = self.client.get(f'/api/reviews/?product={self.product.pk}')
         self.assertEqual(r.status_code, 200)
-        data = r.json()['data']
+        data = r.json()['data']['results']
         ids = [rv['id'] for rv in data]
         self.assertIn(str(self.r2o.pk), ids)
         self.assertNotIn(str(self.o2r.pk), ids)
@@ -247,7 +247,7 @@ class TestReviewListEndpoints(TestCase):
     def test_user_list_returns_reviews_received(self):
         r = self.client.get(f'/api/reviews/?user={self.owner.pk}')
         self.assertEqual(r.status_code, 200)
-        data = r.json()['data']
+        data = r.json()['data']['results']
         self.assertEqual(len(data), 1)
         self.assertEqual(data[0]['id'], str(self.r2o.pk))
 
@@ -277,7 +277,7 @@ class TestReviewPending(TestCase):
     def test_pending_shows_unreviewed_completed_rentals(self):
         r = self.client.get('/api/reviews/pending/', **auth_headers(self.renter))
         self.assertEqual(r.status_code, 200)
-        ids = [item['id'] for item in r.json()['data']]
+        ids = [item['id'] for item in r.json()['data']['results']]
         self.assertIn(str(self.rental.pk), ids)
 
     def test_pending_excludes_already_reviewed(self):
@@ -291,12 +291,12 @@ class TestReviewPending(TestCase):
         )
         r = self.client.get('/api/reviews/pending/', **auth_headers(self.renter))
         self.assertEqual(r.status_code, 200)
-        self.assertEqual(len(r.json()['data']), 0)
+        self.assertEqual(len(r.json()['data']['results']), 0)
 
     def test_pending_excludes_non_completed_rentals(self):
         accepted = RentalFactory(renter=self.renter, status='accepted')
         r = self.client.get('/api/reviews/pending/', **auth_headers(self.renter))
-        ids = [item['id'] for item in r.json()['data']]
+        ids = [item['id'] for item in r.json()['data']['results']]
         self.assertNotIn(str(accepted.pk), ids)
         self.assertEqual(len(ids), 1)
 

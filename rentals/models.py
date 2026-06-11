@@ -94,6 +94,16 @@ class Rental(models.Model):
         ordering = ['-created_at']
         verbose_name = _('Rental')
         verbose_name_plural = _('Rentals')
+        indexes = [
+            # Overlap guard, blocked-dates, has_blocking_rentals — one index covers all
+            models.Index(
+                fields=['product', 'status', 'start_date', 'end_date'],
+                name='rental_overlap_idx',
+            ),
+            # Duplicate-request guard + my-rentals scoping
+            models.Index(fields=['renter', 'status'], name='rental_renter_status_idx'),
+            models.Index(fields=['owner', 'status'], name='rental_owner_status_idx'),
+        ]
 
     def __str__(self):
         return f'{self.product} — {self.renter} ({self.status})'
@@ -106,29 +116,48 @@ class Rental(models.Model):
         """
         Validate and apply a status transition.
         Raises TransitionError if the transition is not allowed.
-        For pending→accepted: wraps in atomic + select_for_update to prevent
-        double-booking (§4.4).
+        Every transition runs in an atomic block with the rental row locked and
+        its status re-read — a stale in-memory instance (e.g. two concurrent
+        requests for the same rental) cannot apply a transition twice or bypass
+        the matrix. For pending→accepted the product row is locked first to
+        serialize concurrent accepts across rentals (§4.4).
         """
-        allowed = ALLOWED_TRANSITIONS.get(self.status, {})
-        if new_status not in allowed:
-            raise TransitionError(
-                f"Cannot transition '{self.status}' → '{new_status}'."
-            )
-
-        actor_role = get_actor_role(self, actor)
-        if not role_matches(actor_role, allowed[new_status]):
-            raise TransitionError(
-                f"Role '{actor_role}' cannot perform '{self.status}' → '{new_status}'."
-            )
-
-        if self.status == 'pending' and new_status == 'accepted':
-            with transaction.atomic():
-                # Lock the product row to serialize concurrent accepts (§4.4)
+        with transaction.atomic():
+            if self.status == 'pending' and new_status == 'accepted':
+                # Lock the product row to serialize concurrent accepts (§4.4).
+                # Lock order is always product → rental; no path locks the
+                # reverse, so this cannot deadlock.
                 Product.objects.select_for_update().get(pk=self.product_id)
+
+            # Re-read own status under lock: a concurrent transition may have
+            # already moved this rental while we validated against stale state
+            current_status = (
+                Rental.objects.select_for_update()
+                .values_list('status', flat=True)
+                .get(pk=self.pk)
+            )
+            if current_status != self.status:
+                raise TransitionError(
+                    f"Cannot transition '{current_status}' → '{new_status}': "
+                    f"rental was modified by a concurrent request."
+                )
+
+            allowed = ALLOWED_TRANSITIONS.get(self.status, {})
+            if new_status not in allowed:
+                raise TransitionError(
+                    f"Cannot transition '{self.status}' → '{new_status}'."
+                )
+
+            actor_role = get_actor_role(self, actor)
+            if not role_matches(actor_role, allowed[new_status]):
+                raise TransitionError(
+                    f"Role '{actor_role}' cannot perform '{self.status}' → '{new_status}'."
+                )
+
+            if self.status == 'pending' and new_status == 'accepted':
                 self._guard_accept()
-                self._apply(new_status, actor, note)
-        else:
-            self._run_guard(new_status, actor)
+            else:
+                self._run_guard(new_status, actor)
             self._apply(new_status, actor, note)
 
     # ------------------------------------------------------------------
@@ -144,7 +173,7 @@ class Rental(models.Model):
             'actor_id': str(actor.pk) if actor else None,
             'note': note,
         }]
-        self.save()
+        self.save(update_fields=['status', 'status_history', 'updated_at'])
 
         if new_status == 'completed':
             # Increment rental_count on the product using F() to avoid races
@@ -175,7 +204,8 @@ class Rental(models.Model):
             raise TransitionError('These dates are already booked by another rental.')
 
         # Auto-reject other pending rentals that overlap with these dates
-        now = timezone.now().isoformat()
+        now = timezone.now()
+        to_reject = []
         for other in Rental.objects.filter(
             product_id=self.product_id,
             status='pending',
@@ -186,11 +216,17 @@ class Rental(models.Model):
             other.status = 'rejected'
             other.status_history = list(other.status_history) + [{
                 'status': 'rejected',
-                'timestamp': now,
+                'timestamp': now.isoformat(),
                 'actor_id': None,
                 'note': 'Auto-rejected: dates were booked',
             }]
-            other.save()
+            # bulk_update skips auto_now — set updated_at by hand
+            other.updated_at = now
+            to_reject.append(other)
+        if to_reject:
+            Rental.objects.bulk_update(
+                to_reject, ['status', 'status_history', 'updated_at']
+            )
 
     def _guard_cancel_accepted(self, actor):
         """Renter can only cancel an accepted rental if it hasn't started yet (§4.4)."""

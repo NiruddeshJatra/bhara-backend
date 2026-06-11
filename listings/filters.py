@@ -10,11 +10,13 @@ class ProductFilter(filters.FilterSet):
 
   search = filters.CharFilter(method='filter_search', label='Search by title, category, or type')
   location = filters.CharFilter(field_name='location', lookup_expr='icontains')
-  min_price = filters.NumberFilter(field_name='pricing_tiers__price', lookup_expr='gte')
-  max_price = filters.NumberFilter(field_name='pricing_tiers__price', lookup_expr='lte')
+  # distinct=True: the pricing_tiers join yields one row per matching tier —
+  # without it a product with several qualifying tiers appears multiple times
+  min_price = filters.NumberFilter(field_name='pricing_tiers__price', lookup_expr='gte', distinct=True)
+  max_price = filters.NumberFilter(field_name='pricing_tiers__price', lookup_expr='lte', distinct=True)
   start_date = filters.DateFilter(method='filter_availability', label='Available from date')
   end_date = filters.DateFilter(method='filter_availability', label='Available until date')
-  duration_unit = filters.CharFilter(field_name='pricing_tiers__duration_unit', lookup_expr='iexact')
+  duration_unit = filters.CharFilter(field_name='pricing_tiers__duration_unit', lookup_expr='iexact', distinct=True)
   ordering = filters.CharFilter(method='filter_ordering', label='Order by')
 
   class Meta:

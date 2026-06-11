@@ -1,21 +1,15 @@
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
-from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import MultiPartParser, FormParser, JSONParser
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import F
 from django_filters.rest_framework import DjangoFilterBackend
 
+from core.pagination import StandardResultsSetPagination
 from core.responses import success_response, error_response
 from listings.filters import ProductFilter
 from listings.models import Product
 from listings.serializers import ProductSerializer
-
-
-class StandardResultsSetPagination(PageNumberPagination):
-  page_size = 20
-  page_size_query_param = 'page_size'
-  max_page_size = 80
 
 
 class ProductViewSet(viewsets.ModelViewSet):
@@ -60,7 +54,8 @@ class ProductViewSet(viewsets.ModelViewSet):
     product = self.get_object()
     if request.user != product.owner:
       Product.objects.filter(pk=product.pk).update(views_count=F('views_count') + 1)
-      product.refresh_from_db(fields=['views_count'])
+      # Mirror the increment in memory for the response — saves a re-fetch query
+      product.views_count += 1
     serializer = self.get_serializer(product)
     return success_response(serializer.data)
 

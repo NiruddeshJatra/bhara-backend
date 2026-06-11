@@ -3,6 +3,7 @@ from rest_framework import status, viewsets
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny, IsAuthenticated
 
+from core.pagination import StandardResultsSetPagination, paginated_success_response
 from core.responses import error_response, success_response
 from rentals.models import Rental
 from rentals.serializers import RentalListSerializer
@@ -11,6 +12,7 @@ from reviews.serializers import ReviewCreateSerializer, ReviewSerializer
 
 
 class ReviewViewSet(viewsets.GenericViewSet):
+    pagination_class = StandardResultsSetPagination
 
     def get_permissions(self):
         if self.action == 'list':
@@ -47,7 +49,7 @@ class ReviewViewSet(viewsets.GenericViewSet):
                 status_code=status.HTTP_400_BAD_REQUEST,
             )
 
-        return success_response(ReviewSerializer(qs, many=True).data)
+        return paginated_success_response(self, qs, ReviewSerializer)
 
     @action(detail=False, methods=['get'])
     def pending(self, request):
@@ -64,4 +66,4 @@ class ReviewViewSet(viewsets.GenericViewSet):
             .exclude(pk__in=reviewed_rental_ids)
             .select_related('product', 'owner', 'renter')
         )
-        return success_response(RentalListSerializer(rentals, many=True).data)
+        return paginated_success_response(self, rentals, RentalListSerializer)

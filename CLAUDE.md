@@ -22,8 +22,9 @@ core/
 ├── settings/
 │   ├── base.py          ← shared settings; SERVICE_FEE_RATE = Decimal('0.20')
 │   ├── development.py   ← DEBUG=True, LocMemCache, SQLite
-│   └── production.py    ← ALLOWED_HOSTS must be set explicitly; CORS_ALLOWED_ORIGINS
+│   └── production.py    ← ALLOWED_HOSTS must be set explicitly; CORS_ALLOWED_ORIGINS; CONN_MAX_AGE=60
 ├── responses.py         ← SINGLE SOURCE for {success, message, data} envelope
+├── pagination.py        ← StandardResultsSetPagination + paginated_success_response (shared by all apps)
 ├── urls.py              ← root URL conf; api/auth/, api/users/, api/listings/, api/rentals/
 ├── celery.py            ← Celery app instance
 services/
@@ -40,11 +41,11 @@ listings/
 ├── constants.py         ← CATEGORY_CHOICES, STATUS_CHOICES = [draft, active, suspended]
 ├── serializers.py       ← image compression in validate_images() (OUTSIDE transaction)
 ├── filters.py           ← ProductFilter; availability filter via Q-exclude (incl. accepted/in_progress rentals)
-├── services.py          ← get_blocked_dates(product) → a set of dates — owner periods + rental-occupied dates (§4.6)
+├── services.py          ← get_blocked_dates(product, start=None, end=None) → set of dates; window args push overlap filter into SQL
 ├── admin.py             ← ProductAdmin; suspend/re-activate actions; image + pricing tier inlines
 ├── views.py             ← ProductViewSet; no caching; F() for views_count
 ├── urls.py              ← DefaultRouter at api/listings/
-└── tests/               ← 19 listings tests (visibility, create validation, availability filter)
+└── tests/               ← 25 listings tests (visibility, create validation, availability filter, perf regressions)
 rentals/
 ├── state_machine.py     ← ALLOWED_TRANSITIONS dict + TransitionError + get_actor_role + role_matches (§4.2)
 ├── models.py            ← Rental (transition() method), RentalPhoto (uploaded_by), PaymentRecord (append-only)
@@ -53,7 +54,7 @@ rentals/
 ├── urls.py              ← DefaultRouter at api/rentals/
 ├── admin.py             ← RentalAdmin; transition actions; PaymentRecord add-only inline (recorded_by auto-set)
 ├── migrations/
-└── tests/               ← 54 tests (transition matrix, double-booking, §5.3 guard, snapshot, photos)
+└── tests/               ← 58 tests (transition matrix, double-booking, §5.3 guard, snapshot, photos, query counts, stale-instance re-check)
 reviews/
 ├── models.py            ← Review (UUID pk, UniqueConstraint rental+reviewer); _recompute_ratings() on save
 ├── serializers.py       ← ReviewCreateSerializer (server-derives direction/reviewee); ReviewSerializer
@@ -118,7 +119,17 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 - **CheckConstraint** uses `condition=` in Django 6.0 (not `check=` — that's Django 5.x).
 - **`django_filters`**: in `INSTALLED_APPS`. ProductFilter uses `django_filters.FilterSet`.
 - **F() for views_count**: `Product.objects.filter(pk=pk).update(views_count=F('views_count') + 1)` — skips owner's own views.
-- **Pagination**: `PageNumberPagination`, `page_size=20`, `max_page_size=80`.
+- **Pagination**: `StandardResultsSetPagination` in `core/pagination.py` (`page_size=20`, `max_page_size=80`) — single source, do NOT redefine per app. Paginated list endpoints (listings list/my_products, rentals my-rentals/my-listings-rentals, reviews list/pending) return `data = {count, next, previous, results}`. Use `paginated_success_response(viewset, qs, serializer_class)` for GenericViewSet actions.
+- **Composite indexes**: `Rental` has `(product, status, start_date, end_date)` + `(renter, status)` + `(owner, status)`; `Product` has `(status, -created_at)`; `Review` has `(product, direction)`. Add to `Meta.indexes` — keep migrations in sync.
+- **Transition saves**: `Rental._apply()` and auto-reject use `save(update_fields=['status', 'status_history', 'updated_at'])` — never full-row save inside the accept lock. Auto-reject uses `bulk_update` (sets `updated_at` manually — `bulk_update` skips `auto_now`).
+- **Transition status re-check**: every `Rental.transition()` runs in `atomic()` with the rental row `select_for_update`-locked and `status` re-read before validation — a stale in-memory instance raises `TransitionError` instead of double-applying. Lock order is always product → rental (accept locks product first); never lock the reverse.
+- **Auth throttles**: `LoginRateThrottle` 10/min/IP on login (bounds password spraying + victim-lockout DoS); `OTPDailyRateThrottle` 20/day/IP on OTP request (bounds SMS billing attacks — 3/min alone allowed 4,320 SMS/day/IP). Tests call `cache.clear()` in `setUp` so throttle history never leaks between tests.
+- **Signup TOCTOU**: `create_user` wrapped in `try/except IntegrityError` → 400, not 500 — the unique constraint is the real guard, the `exists()` check is just UX.
+- **Prod Redis must use `maxmemory-policy noeviction`** — eviction silently wipes lockout counters and used-JTI keys (disables brute-force protection, enables ephemeral-token replay).
+- **Filter `distinct=True`**: `min_price`/`max_price`/`duration_unit` on ProductFilter join `pricing_tiers` — `distinct=True` required or products with several matching tiers duplicate.
+- **`get_blocked_dates(product, start, end)`**: always pass the window when checking a specific date range — without it the product's entire rental history is fetched and expanded.
+- **Rental list vs detail prefetch**: `payment_records` prefetched only for `retrieve` — `RentalListSerializer` never reads them.
+- **Tests hit the real dev `db.sqlite3`** — `conftest.py` no-ops `django_db_setup`. NEVER run two pytest invocations concurrently (cross-run corruption, observed). Suite takes ~9 min.
 - **Rental status transitions**: always call `rental.transition(new_status, actor, note='')` — never assign `rental.status` directly. `ALLOWED_TRANSITIONS` in `rentals/state_machine.py` is the single source of truth.
 - **Pricing snapshot**: `unit_price`, `base_cost`, `service_fee`, `owner_payout`, `security_deposit` are frozen at create time from `PricingTier.price * duration`. Changing the tier afterward has no effect.
 - **PaymentRecord is append-only**: no edit/delete in admin. Corrections go in as offsetting records. `recorded_by` auto-set to `request.user` in `RentalAdmin.save_formset`.
@@ -140,10 +151,10 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 ## Running Tests
 
 ```bash
-pytest                        # all 169 tests
+pytest                        # all 179 tests (~9 min — tests hit real dev SQLite; never run two suites at once)
 pytest users/                 # 70 auth tests
-pytest listings/              # 19 listings tests
-pytest rentals/               # 54 rentals tests (matrix, double-booking, §5.3, snapshot, photos)
+pytest listings/              # 25 listings tests
+pytest rentals/               # 58 rentals tests (matrix, double-booking, §5.3, snapshot, photos, query counts, state re-check)
 pytest reviews/               # 21 reviews tests (creation rules, aggregation, list, pending)
 pytest -x -v                  # stop on first failure, verbose
 ```
