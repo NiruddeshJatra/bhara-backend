@@ -137,3 +137,14 @@ Sequential history of every significant change. Read top-to-bottom for full pict
   - Strengthened SQL assertion in `test_windowed_query_filters_in_sql` to check for both `start_date` and `end_date` with the overlap operators (`<=` and `>=`).
 - **Tests**: +2 new (181 total) — `test_unavailable_period_single_day`, `test_unavailable_period_ranges`.
 
+---
+
+## Pre-Deployment Fixes — Phone Privacy, Storage, Health, Owner SMS
+**2026-06-12 — 4 targeted fixes before production launch**
+
+- **Phone privacy** (`rentals/serializers.py`): replaced `renter_phone`/`owner_phone` fields with `renter_info`/`owner_info` = `{full_name, trust_level, average_rating}` via shared `_public_party()` helper on both `RentalListSerializer` and `RentalDetailSerializer`. Prevents counterparty phone exposure (counter-disintermediation). `rentals/tests/test_phone_privacy.py` asserts phone string absent from both detail (both directions) and list payloads.
+- **STORAGES fix** (`core/settings/production.py`): replaced deprecated `DEFAULT_FILE_STORAGE` (silently dead in Django 6) with `STORAGES` dict — `S3Boto3Storage` for media, `whitenoise.CompressedManifestStaticFilesStorage` for staticfiles. Added R2-compatible settings: `AWS_S3_ENDPOINT_URL`, `AWS_S3_REGION_NAME` (default `auto`), `AWS_S3_SIGNATURE_VERSION='s3v4'`, `AWS_S3_CUSTOM_DOMAIN` with conditional `MEDIA_URL` override.
+- **Health endpoint + whitenoise** (`core/views.py`, `core/urls.py`, `core/settings/base.py`): `GET /api/health/` as plain Django `JsonResponse` view — no DRF, no auth, no throttle. Probes `connection.ensure_connection()` then cache set/get roundtrip; 503 `{status:error, component:database|cache}` on failure. `WhiteNoiseMiddleware` added after `SecurityMiddleware` in base; `whitenoise` in `requirements.txt`.
+- **Owner SMS notification** (`celery_tasks/rentals.py`, `rentals/serializers.py`): new `send_rental_request_sms` Celery task (retry×3, 30s delay) sends Bangla-language SMS to product owner when rental created. Enqueued via `transaction.on_commit` in `RentalCreateSerializer.create` — fires ONLY after commit, ONLY on create (not on accept/reject). `rentals/tests/test_notifications.py` uses `captureOnCommitCallbacks(execute=True)` to verify enqueue-once-on-create and not-enqueued-on-transition.
+- **Tests**: +4 new (185 total) — `test_phone_privacy.py` (2), `test_notifications.py` (2).
+

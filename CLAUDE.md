@@ -10,8 +10,9 @@ Django REST API backend for Bhara — a peer-to-peer rental marketplace. Users l
 - **Django REST Framework** — ViewSets, serializers, permissions
 - **djangorestframework-simplejwt** + **token_blacklist** — JWT auth with refresh rotation
 - **django-filter** — ProductFilter for availability/price/search filtering
-- **Celery + Redis** — async tasks (OTP SMS delivery)
-- **django-storages[s3] / boto3** — S3 media storage (production)
+- **Celery + Redis** — async tasks (OTP SMS delivery, owner rental-request SMS)
+- **whitenoise** — static file serving in production (admin CSS/JS from gunicorn)
+- **django-storages[s3] / boto3** — S3/R2 media storage (production)
 - **Pillow** — image compression/validation
 - **pytest-django** — test runner (`conftest.py` + `pytest.ini`)
 
@@ -54,7 +55,7 @@ rentals/
 ├── urls.py              ← DefaultRouter at api/rentals/
 ├── admin.py             ← RentalAdmin; transition actions; PaymentRecord add-only inline (recorded_by auto-set)
 ├── migrations/
-└── tests/               ← 58 tests (transition matrix, double-booking, §5.3 guard, snapshot, photos, query counts, stale-instance re-check)
+└── tests/               ← 64 tests (transition matrix, double-booking, §5.3, snapshot, photos, query counts, stale-instance, phone privacy, owner SMS)
 reviews/
 ├── models.py            ← Review (UUID pk, UniqueConstraint rental+reviewer); _recompute_ratings() on save
 ├── serializers.py       ← ReviewCreateSerializer (server-derives direction/reviewee); ReviewSerializer
@@ -64,7 +65,10 @@ reviews/
 ├── migrations/
 └── tests/               ← 21 tests (creation rules, aggregation math, list filtering, pending)
 celery_tasks/
-└── users.py             ← send_otp_task (async SMS delivery)
+├── users.py             ← send_otp_task (async SMS delivery)
+└── rentals.py           ← send_rental_request_sms (owner notified on new rental request; retry×3)
+core/
+└── views.py             ← health() plain Django view — DB + cache probe; no DRF/auth/throttle
 docs/
 ├── bhara_rebuild_spec.md     ← full rebuild spec (§1–§9)
 ├── bhara_auth_instructions.md ← auth module spec (still authoritative for auth)
@@ -102,6 +106,7 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 | GET | `/api/reviews/?product={id}` | None | Public: renter_to_owner reviews for a product |
 | GET | `/api/reviews/?user={id}` | None | Public: reviews received by a user |
 | GET | `/api/reviews/pending/` | Auth | My completed rentals awaiting my review |
+| GET | `/api/health/` | None | DB + cache liveness probe; 200 ok / 503 error+component |
 
 ## Key Conventions
 
@@ -140,6 +145,10 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 - **Review direction + reviewee**: always derived server-side in `ReviewCreateSerializer.validate()` from who the reviewer is. Client sends only `{rental_id, rating, comment}`.
 - **Review aggregation**: `Review._recompute_ratings()` runs on every `save()`. renter_to_owner only updates `product.average_rating`; all reviews update `reviewee.average_rating`. Both via `aggregate(Avg)` + `.update()` — atomic, no SELECT then SET.
 - **Spec files moved to `docs/`**: `bhara_rebuild_spec.md`, `bhara_auth_instructions.md`, `INSTALLATION.md` are in `docs/` not root.
+- **Rental party info**: serializers expose `renter_info`/`owner_info` = `{full_name, trust_level, average_rating}` via shared `_public_party()`. Phone numbers never in rental responses (counter-disintermediation).
+- **Owner SMS on rental create**: `transaction.on_commit(lambda: send_rental_request_sms.delay(phone, title[:30]))` in `RentalCreateSerializer.create` — fires ONLY on create (not accept/reject). Task in `celery_tasks/rentals.py`.
+- **STORAGES dict**: production uses `STORAGES = {'default': S3Boto3Storage, 'staticfiles': whitenoise.CompressedManifestStaticFilesStorage}` — not deprecated `DEFAULT_FILE_STORAGE`. R2-compatible: `AWS_S3_ENDPOINT_URL`, `AWS_S3_REGION_NAME='auto'`, `AWS_S3_SIGNATURE_VERSION='s3v4'`, `AWS_S3_CUSTOM_DOMAIN`.
+- **Health view is plain Django**: `core/views.py:health` uses `django.http.JsonResponse` + `connection.ensure_connection()` + cache roundtrip. Do NOT wrap in DRF — it must be throttle-free and auth-free.
 
 ## Settings Structure
 
@@ -147,14 +156,15 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 - `SERVICE_FEE_RATE = Decimal('0.20')` in `base.py`
 - `LOGIN_MAX_ATTEMPTS = 5`, `LOGIN_LOCKOUT_SECONDS = 900` in `base.py`
 - `OTP_TTL_SECONDS = 300`, `OTP_DEBUG_VALUE = '111111'` (DEBUG only) in `base.py`
+- Production R2/S3: `AWS_S3_ENDPOINT_URL`, `AWS_S3_REGION_NAME` (default `auto`), `AWS_S3_CUSTOM_DOMAIN` in `.env`. When `AWS_S3_CUSTOM_DOMAIN` set, `MEDIA_URL=https://<domain>/`.
 
 ## Running Tests
 
 ```bash
-pytest                        # all 181 tests (~9 min — tests hit real dev SQLite; never run two suites at once)
+pytest                        # all 185 tests (~9 min — tests hit real dev SQLite; never run two suites at once)
 pytest users/                 # 70 auth tests
 pytest listings/              # 27 listings tests
-pytest rentals/               # 58 rentals tests (matrix, double-booking, §5.3, snapshot, photos, query counts, state re-check)
+pytest rentals/               # 64 rentals tests (matrix, double-booking, §5.3, snapshot, photos, query counts, state re-check, phone privacy, owner SMS)
 pytest reviews/               # 21 reviews tests (creation rules, aggregation, list, pending)
 pytest -x -v                  # stop on first failure, verbose
 ```

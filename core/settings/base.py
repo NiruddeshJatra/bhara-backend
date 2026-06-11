@@ -29,6 +29,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
   'corsheaders.middleware.CorsMiddleware',  # Adds CORS headers to allow cross-origin requests from allowed domains
   'django.middleware.security.SecurityMiddleware',  # Enforces security settings like HTTPS redirects and security headers
+  'whitenoise.middleware.WhiteNoiseMiddleware',  # Serves static files (admin CSS/JS) directly from gunicorn
   'django.contrib.sessions.middleware.SessionMiddleware',  # Creates and manages session data using cookies or database
   'django.middleware.common.CommonMiddleware',  # Handles URL rewriting, content-type parsing, and basic request processing
   'django.middleware.csrf.CsrfViewMiddleware',  # Generates and validates CSRF tokens to prevent cross-site request forgery
