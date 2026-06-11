@@ -3,6 +3,7 @@ djangorestframework
 djangorestframework-simplejwt
 django-redis
 django-cors-headers
+django-filter
 django-storages[s3]
 celery
 redis

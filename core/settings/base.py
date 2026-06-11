@@ -1,6 +1,7 @@
 from pathlib import Path
 from decouple import config, Csv  # python-decouple helps manage configuration settings from environment variables.
 from datetime import timedelta
+from decimal import Decimal
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
@@ -18,7 +19,9 @@ INSTALLED_APPS = [
   'rest_framework_simplejwt',
   'rest_framework_simplejwt.token_blacklist',
   'corsheaders',
+  'django_filters',
   'users',
+  'listings',
 ]
 
 MIDDLEWARE = [
@@ -122,6 +125,9 @@ ALPHA_SMS_API_KEY = config('ALPHA_SMS_API_KEY', default='')
 # Login Lockout Configuration
 LOGIN_MAX_ATTEMPTS = 5
 LOGIN_LOCKOUT_SECONDS = 900   # 15 minutes
+
+# Single source of truth for the platform service fee (deducted from owner payout)
+SERVICE_FEE_RATE = Decimal('0.20')
 
 # CORS Configuration
 CORS_ALLOWED_ORIGINS = [

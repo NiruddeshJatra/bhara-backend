@@ -1,9 +1,9 @@
 from .base import *
 from decouple import config
 
-DEBUG = False
+DEBUG = False  # never overridable in production
 SECRET_KEY = config('SECRET_KEY')
-ALLOWED_HOSTS = config('ALLOWED_HOSTS', cast=Csv(), default='').split(',') if config('ALLOWED_HOSTS', default='') else []
+ALLOWED_HOSTS = config('ALLOWED_HOSTS', cast=Csv())  # no default — must be set explicitly
 
 # Database
 DATABASES = {
@@ -56,7 +56,14 @@ MEDIA_URL = f'https://{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_S3_REGION_NAME}.amazonaw
 # Enable real SMS in production
 ALPHA_SMS_ENABLED = True
 
+# CORS — bhara.xyz ↔ api.bhara.xyz are same-site
+CORS_ALLOWED_ORIGINS = ['https://bhara.xyz']
+
 # Security settings for production
+SESSION_COOKIE_SECURE = True
+SESSION_COOKIE_SAMESITE = 'Strict'
+CSRF_COOKIE_SECURE = True
+CSRF_COOKIE_SAMESITE = 'Strict'
 SECURE_SSL_REDIRECT = True
 SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
 SECURE_BROWSER_XSS_FILTER = True
