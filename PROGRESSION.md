@@ -88,3 +88,16 @@ Sequential history of every significant change. Read top-to-bottom for full pict
 - **`rentals/serializers.py`**: availability check delegates to `get_blocked_dates(product)` (§4.6 single source); `get_settlement` also uses `Decimal('0')` start.
 - **`rentals/tests/test_rentals.py`**: added `TestRentalAPIPhotos` (5 tests: participant access, stranger 404, upload for accepted/in_progress, blocked for pending, oversized rejected before save); added `test_unknown_unit_raises` to `TestComputeEndDate`.
 - Total: 148 tests passing (7 new).
+
+---
+
+## Phase 4 — Reviews App (§7) + Project Cleanup
+**2026-06-11 — minimal reviews, aggregation, 4 endpoints, docs reorganization**
+
+- **`reviews/`** (NEW app): `Review` model with UUID pk, FK to Rental/User/Product, `direction` + `reviewee` always derived server-side (client sends only `rental_id, rating, comment`). `UniqueConstraint(rental, reviewer)` enforces one review per party. `_recompute_ratings()` on every `save()`: renter_to_owner updates `product.average_rating`; all reviews update `reviewee.average_rating` — both via `aggregate(Avg)` + `.update()`, no race.
+- **`reviews/serializers.py`**: `ReviewCreateSerializer` validates rental.status=completed, reviewer is participant, within 30 days (scans `status_history` for completion timestamp), no duplicate. Derives direction/reviewee; product FK set from rental.
+- **`reviews/views.py`**: `ReviewViewSet` — `create` (auth), `list` (AllowAny; requires `?product` or `?user` param; product filter excludes owner_to_renter), `pending` (auth; completed rentals I haven't reviewed yet).
+- **`reviews/admin.py`**: list + delete only; `has_change_permission=False`.
+- **`docs/`** (NEW folder): moved `bhara_rebuild_spec.md`, `bhara_auth_instructions.md`, `INSTALLATION.md` out of root.
+- CLAUDE.md updated: endpoints table, conventions, spec path, test counts.
+- Total: 169 tests passing (21 new).
