@@ -24,7 +24,7 @@ core/
 │   ├── development.py   ← DEBUG=True, LocMemCache, SQLite
 │   └── production.py    ← ALLOWED_HOSTS must be set explicitly; CORS_ALLOWED_ORIGINS
 ├── responses.py         ← SINGLE SOURCE for {success, message, data} envelope
-├── urls.py              ← root URL conf; api/auth/, api/users/, api/listings/
+├── urls.py              ← root URL conf; api/auth/, api/users/, api/listings/, api/rentals/
 ├── celery.py            ← Celery app instance
 services/
 ├── otp.py               ← OTP create/verify with hmac.compare_digest + brute-force lockout
@@ -39,12 +39,24 @@ listings/
 ├── models.py            ← Product, ProductImage, PricingTier, UnavailablePeriod
 ├── constants.py         ← CATEGORY_CHOICES, STATUS_CHOICES = [draft, active, suspended]
 ├── serializers.py       ← image compression in validate_images() (OUTSIDE transaction)
-├── filters.py           ← ProductFilter; availability filter via Q-exclude
+├── filters.py           ← ProductFilter; availability filter via Q-exclude (incl. accepted/in_progress rentals)
+├── services.py          ← get_blocked_dates(product) → set of date — owner periods + rental-occupied dates (§4.6)
+├── admin.py             ← ProductAdmin; suspend/re-activate actions; image + pricing tier inlines
 ├── views.py             ← ProductViewSet; no caching; F() for views_count
 ├── urls.py              ← DefaultRouter at api/listings/
 └── tests/               ← 19 listings tests (visibility, create validation, availability filter)
+rentals/
+├── state_machine.py     ← ALLOWED_TRANSITIONS dict + TransitionError + get_actor_role + role_matches (§4.2)
+├── models.py            ← Rental (transition() method), RentalPhoto (uploaded_by), PaymentRecord (append-only)
+├── serializers.py       ← RentalCreateSerializer (all §4.4 create guards), RentalDetailSerializer (settlement block)
+├── views.py             ← RentalViewSet — 8 endpoints per §4.5; never sets rental.status directly
+├── urls.py              ← DefaultRouter at api/rentals/
+├── admin.py             ← RentalAdmin; transition actions; PaymentRecord add-only inline (recorded_by auto-set)
+├── migrations/
+└── tests/               ← 47 tests (transition matrix, double-booking, §5.3 guard, snapshot immutability)
 celery_tasks/
 └── users.py             ← send_otp_task (async SMS delivery)
+pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 ```
 
 ## API Endpoints
@@ -65,6 +77,14 @@ celery_tasks/
 | PUT/PATCH | `/api/listings/{id}/` | Owner | Update listing |
 | DELETE | `/api/listings/{id}/` | Owner | Delete listing |
 | GET | `/api/listings/my_products/` | Auth | Owner's listings (all statuses) |
+| POST | `/api/rentals/` | Auth (renter) | Create rental request |
+| GET | `/api/rentals/my-rentals/` | Auth | Rentals where I'm renter |
+| GET | `/api/rentals/my-listings-rentals/` | Auth | Rentals where I'm owner |
+| GET | `/api/rentals/{id}/` | Participant/Staff | Detail + payment_records + settlement |
+| POST | `/api/rentals/{id}/accept/` | Owner | pending → accepted |
+| POST | `/api/rentals/{id}/reject/` | Owner | pending → rejected |
+| POST | `/api/rentals/{id}/cancel/` | Renter | → cancelled |
+| GET/POST | `/api/rentals/{id}/photos/` | Participant/Staff | Rental documentation photos |
 
 ## Key Conventions
 
@@ -83,6 +103,12 @@ celery_tasks/
 - **`django_filters`**: in `INSTALLED_APPS`. ProductFilter uses `django_filters.FilterSet`.
 - **F() for views_count**: `Product.objects.filter(pk=pk).update(views_count=F('views_count') + 1)` — skips owner's own views.
 - **Pagination**: `PageNumberPagination`, `page_size=20`, `max_page_size=80`.
+- **Rental status transitions**: always call `rental.transition(new_status, actor, note='')` — never assign `rental.status` directly. `ALLOWED_TRANSITIONS` in `rentals/state_machine.py` is the single source of truth.
+- **Pricing snapshot**: `unit_price`, `base_cost`, `service_fee`, `owner_payout`, `security_deposit` are frozen at create time from `PricingTier.price * duration`. Changing the tier afterward has no effect.
+- **PaymentRecord is append-only**: no edit/delete in admin. Corrections go in as offsetting records. `recorded_by` auto-set to `request.user` in `RentalAdmin.save_formset`.
+- **§5.3 completion guard**: `in_progress → completed` blocked unless rent_collected ≥ base_cost, deposit fully settled (collected == returned + withheld), and owner_payout record present. Each missing piece raises `TransitionError` with a specific message.
+- **Double-booking guard**: `pending → accepted` wraps in `transaction.atomic()` + `Product.objects.select_for_update()`. Overlapping accepted/in_progress rentals raise `TransitionError`; overlapping pending requests are auto-rejected with note 'Auto-rejected: dates were booked'.
+- **`has_completed_transactions()`**: uses `Q(renter=self) | Q(owner=self)` — Rental has no `user` field.
 
 ## Settings Structure
 
@@ -94,9 +120,10 @@ celery_tasks/
 ## Running Tests
 
 ```bash
-pytest                        # all 89 tests
+pytest                        # all 141 tests
 pytest users/                 # 70 auth tests
 pytest listings/              # 19 listings tests
+pytest rentals/               # 47 rentals tests (matrix, double-booking, §5.3, snapshot)
 pytest -x -v                  # stop on first failure, verbose
 ```
 
@@ -105,6 +132,9 @@ pytest -x -v                  # stop on first failure, verbose
 Full rebuild spec in `bhara_rebuild_spec.md`. Sections implemented so far:
 - §2 — core/responses.py extraction ✅
 - §3 — listings app (Product, images, pricing tiers, availability) ✅
+- §4 — rentals app (Rental model, state machine, endpoints, double-booking guard) ✅
+- §5 — PaymentRecord (append-only), settlement block in detail, §5.3 completion guard ✅
+- §6 — Django admin (RentalAdmin + ProductAdmin) ✅
 - §9 — auth hardening (brute-force, SMS caps, lockout TTL, token rotation, ephemeral JTI) ✅
 
 ## Skills Active
