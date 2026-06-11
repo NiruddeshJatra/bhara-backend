@@ -46,16 +46,24 @@ SIMPLE_JWT = {
   'AUTH_COOKIE_SECURE': True,
 }
 
-# S3 storage
-DEFAULT_FILE_STORAGE = 'storages.backends.s3boto3.S3Boto3Storage'
+# S3/R2-compatible object storage.
+# Django 6 removed DEFAULT_FILE_STORAGE — STORAGES is the only setting that works.
+STORAGES = {
+  'default': {'BACKEND': 'storages.backends.s3boto3.S3Boto3Storage'},
+  'staticfiles': {'BACKEND': 'whitenoise.storage.CompressedManifestStaticFilesStorage'},
+}
 AWS_ACCESS_KEY_ID = config('AWS_ACCESS_KEY_ID')
 AWS_SECRET_ACCESS_KEY = config('AWS_SECRET_ACCESS_KEY')
 AWS_STORAGE_BUCKET_NAME = config('AWS_STORAGE_BUCKET_NAME')
-AWS_S3_REGION_NAME = config('AWS_S3_REGION_NAME', default='ap-southeast-1')
+AWS_S3_ENDPOINT_URL = config('AWS_S3_ENDPOINT_URL', default='')
+AWS_S3_REGION_NAME = config('AWS_S3_REGION_NAME', default='auto')
+AWS_S3_SIGNATURE_VERSION = 's3v4'
+AWS_S3_CUSTOM_DOMAIN = config('AWS_S3_CUSTOM_DOMAIN', default='')
 AWS_S3_FILE_OVERWRITE = False
 
-# Media URLs for S3
+# Media URLs — custom domain (e.g. R2 public bucket / CDN) wins when set
 MEDIA_URL = f'https://{AWS_STORAGE_BUCKET_NAME}.s3.{AWS_S3_REGION_NAME}.amazonaws.com/media/'
+MEDIA_URL = f'https://{AWS_S3_CUSTOM_DOMAIN}/' if AWS_S3_CUSTOM_DOMAIN else MEDIA_URL
 
 # Enable real SMS in production
 ALPHA_SMS_ENABLED = True

@@ -36,40 +36,62 @@ class RentalPhotoSerializer(serializers.ModelSerializer):
         read_only_fields = ['id', 'uploaded_by', 'created_at']
 
 
+def _public_party(user):
+    """Minimal public info about a rental party — never includes the phone
+    number (counter-disintermediation: contact stays on-platform)."""
+    return {
+        'full_name': user.full_name,
+        'trust_level': user.trust_level,
+        'average_rating': str(user.average_rating),
+    }
+
+
 class RentalListSerializer(serializers.ModelSerializer):
     product_title = serializers.CharField(source='product.title', read_only=True)
-    renter_phone = serializers.CharField(source='renter.phone_number', read_only=True)
-    owner_phone = serializers.CharField(source='owner.phone_number', read_only=True)
+    renter_info = serializers.SerializerMethodField()
+    owner_info = serializers.SerializerMethodField()
 
     class Meta:
         model = Rental
         fields = [
-            'id', 'product', 'product_title', 'renter', 'renter_phone',
-            'owner', 'owner_phone', 'start_date', 'end_date', 'duration',
+            'id', 'product', 'product_title', 'renter', 'renter_info',
+            'owner', 'owner_info', 'start_date', 'end_date', 'duration',
             'duration_unit', 'base_cost', 'security_deposit', 'purpose',
             'status', 'created_at',
         ]
         read_only_fields = fields
 
+    def get_renter_info(self, obj):
+        return _public_party(obj.renter)
+
+    def get_owner_info(self, obj):
+        return _public_party(obj.owner)
+
 
 class RentalDetailSerializer(serializers.ModelSerializer):
     product_title = serializers.CharField(source='product.title', read_only=True)
-    renter_phone = serializers.CharField(source='renter.phone_number', read_only=True)
-    owner_phone = serializers.CharField(source='owner.phone_number', read_only=True)
+    renter_info = serializers.SerializerMethodField()
+    owner_info = serializers.SerializerMethodField()
     payment_records = PaymentRecordSerializer(many=True, read_only=True)
     settlement = serializers.SerializerMethodField()
 
     class Meta:
         model = Rental
         fields = [
-            'id', 'product', 'product_title', 'renter', 'renter_phone',
-            'owner', 'owner_phone', 'start_date', 'end_date', 'duration',
+            'id', 'product', 'product_title', 'renter', 'renter_info',
+            'owner', 'owner_info', 'start_date', 'end_date', 'duration',
             'duration_unit', 'unit_price', 'base_cost', 'service_fee',
             'owner_payout', 'security_deposit', 'purpose', 'notes',
             'status', 'status_history', 'payment_records', 'settlement',
             'created_at', 'updated_at',
         ]
         read_only_fields = fields
+
+    def get_renter_info(self, obj):
+        return _public_party(obj.renter)
+
+    def get_owner_info(self, obj):
+        return _public_party(obj.owner)
 
     def get_settlement(self, obj):
         records = list(obj.payment_records.all())
@@ -159,6 +181,10 @@ class RentalCreateSerializer(serializers.Serializer):
         return data
 
     def create(self, validated_data):
+        from django.db import transaction
+
+        from celery_tasks.rentals import send_rental_request_sms
+
         tier = validated_data.pop('_tier')
         renter = self.context['request'].user
         product = validated_data['product']
@@ -169,7 +195,7 @@ class RentalCreateSerializer(serializers.Serializer):
         owner_payout = base_cost - service_fee
 
         from django.utils import timezone
-        return Rental.objects.create(
+        rental = Rental.objects.create(
             renter=renter,
             owner=product.owner,
             product=product,
@@ -191,3 +217,11 @@ class RentalCreateSerializer(serializers.Serializer):
                 'note': '',
             }],
         )
+
+        # Notify the owner — only after the rental row is durably committed
+        owner_phone = product.owner.phone_number
+        title = product.title[:30]
+        transaction.on_commit(
+            lambda: send_rental_request_sms.delay(owner_phone, title)
+        )
+        return rental
