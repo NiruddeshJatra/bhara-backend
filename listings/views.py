@@ -5,7 +5,7 @@ from rest_framework.permissions import AllowAny, IsAuthenticated
 from django.db.models import F
 from django_filters.rest_framework import DjangoFilterBackend
 
-from core.pagination import StandardResultsSetPagination
+from core.pagination import StandardResultsSetPagination, paginated_success_response
 from core.responses import success_response, error_response
 from listings.filters import ProductFilter
 from listings.models import Product
@@ -39,12 +39,8 @@ class ProductViewSet(viewsets.ModelViewSet):
     return queryset.none()
 
   def _paginated_response(self, queryset):
-    page = self.paginate_queryset(queryset)
-    if page is not None:
-      serializer = self.get_serializer(page, many=True)
-      return success_response(self.paginator.get_paginated_response(serializer.data).data)
-    serializer = self.get_serializer(queryset, many=True)
-    return success_response({'results': serializer.data})
+    return paginated_success_response(self, queryset, self.get_serializer_class())
+
 
   def list(self, request, *args, **kwargs):
     queryset = self.filter_queryset(self.get_queryset())
