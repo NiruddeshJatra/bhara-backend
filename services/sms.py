@@ -22,9 +22,10 @@ class AlphaSMSService:
     recipient = '880' + phone_number[1:]  # 01712345678 -> 8801712345678
 
     try:
-      response = requests.get(
+      # POST, not GET — OTPs in query strings leak into proxy logs
+      response = requests.post(
         f'{self.BASE_URL}/sendsms',
-        params={
+        data={
           'api_key': settings.ALPHA_SMS_API_KEY,
           'msg': message,
           'to': recipient,

@@ -1,8 +1,6 @@
 from rest_framework.views import APIView
-from rest_framework.response import Response
 from rest_framework import status
 from rest_framework.permissions import IsAuthenticated, AllowAny
-from rest_framework.authentication import SessionAuthentication
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth import authenticate
@@ -10,29 +8,15 @@ from django.core.cache import cache
 from django.conf import settings
 from django.db import transaction
 import jwt
+import uuid
 from datetime import datetime, timedelta, timezone
 
+from core.responses import success_response, error_response
 from users.models import User
 from users.utils import compress_image
 from users import serializers as user_serializers
 from services.otp import create_otp, verify_otp
 from celery_tasks.users import send_otp_task
-
-
-def success_response(data=None, message='', status_code=status.HTTP_200_OK):
-  return Response({
-    'success': True,
-    'message': message,
-    'data': data or {},
-  }, status=status_code)
-
-
-def error_response(data=None, message='', status_code=status.HTTP_400_BAD_REQUEST):
-  return Response({
-    'success': False,
-    'message': message,
-    'data': data or {},
-  }, status=status_code)
 
 
 def _set_refresh_cookie(response, refresh_token_str):
@@ -65,21 +49,61 @@ def _create_ephemeral_token(phone_number, purpose):
   payload = {
     'phone_number': phone_number,
     'purpose': f'{purpose}_verified',
+    'jti': str(uuid.uuid4()),
     'exp': datetime.now(timezone.utc) + timedelta(minutes=10),
   }
   return jwt.encode(payload, settings.SECRET_KEY, algorithm='HS256')
 
 
 def _decode_ephemeral_token(token, expected_purpose):
-  """Decodes and validates ephemeral token. Raises jwt exceptions on failure."""
+  """
+  Decodes and validates ephemeral token. Raises jwt exceptions on failure.
+  Rejects tokens whose jti has already been consumed (single-use).
+  Returns (phone_number, jti).
+  """
   payload = jwt.decode(token, settings.SECRET_KEY, algorithms=['HS256'])
   if payload.get('purpose') != expected_purpose:
     raise ValueError('Token purpose mismatch.')
-  return payload['phone_number']
+  jti = payload.get('jti')
+  if not jti or cache.get(f'used_jti:{jti}'):
+    raise ValueError('Token already used.')
+  return payload['phone_number'], jti
+
+
+def _mark_jti_used(jti):
+  """Consumes an ephemeral token's jti — kept for the token's max lifetime."""
+  cache.set(f'used_jti:{jti}', True, timeout=600)
 
 
 class OTPRateThrottle(AnonRateThrottle):
+    scope = 'otp_request'  # own scope — must not share throttle history with verify
     rate = '3/minute' # Max 3 OTP requests per minute per IP
+
+
+class OTPVerifyRateThrottle(AnonRateThrottle):
+    scope = 'otp_verify'
+    rate = '10/minute' # Max 10 OTP verify attempts per minute per IP
+
+
+def _check_sms_caps(phone):
+  """
+  Per-phone SMS caps: 1/min and 5/day. IP throttling alone fails behind
+  BD carrier NAT. Returns an error message if capped, else None.
+  """
+  if cache.get(f'sms_cap:minute:{phone}'):
+    return 'Please wait a minute before requesting another OTP.'
+  if cache.get(f'sms_cap:day:{phone}', 0) >= 5:
+    return 'Daily OTP limit reached. Try again tomorrow.'
+  return None
+
+
+def _record_sms_sent(phone):
+  cache.set(f'sms_cap:minute:{phone}', 1, timeout=60)
+  day_key = f'sms_cap:day:{phone}'
+  try:
+    cache.incr(day_key)
+  except ValueError:
+    cache.set(day_key, 1, timeout=86400)
 
 
 class OTPRequestView(APIView):
@@ -94,14 +118,24 @@ class OTPRequestView(APIView):
     phone = serializer.validated_data['phone_number']
     purpose = serializer.validated_data['purpose']
 
+    cap_message = _check_sms_caps(phone)
+    if cap_message:
+      return error_response(
+        {'detail': cap_message},
+        'Too many OTP requests.',
+        status.HTTP_429_TOO_MANY_REQUESTS
+      )
+
     otp = create_otp(purpose, phone)
     send_otp_task.delay(phone, otp, purpose)
+    _record_sms_sent(phone)
 
     return success_response(message='OTP sent successfully.')
 
 
 class OTPVerifyView(APIView):
   permission_classes = [AllowAny]
+  throttle_classes = [OTPVerifyRateThrottle]
 
   def post(self, request):
     serializer = user_serializers.OTPVerifySerializer(data=request.data)
@@ -129,8 +163,9 @@ class OTPVerifyView(APIView):
 class SignupCompleteView(APIView):
   permission_classes = [AllowAny]
   # We manually validate the ephemeral token from Authorization header.
-  # Disabling default JWT auth prevents DRF from rejecting non-access tokens first.
-  authentication_classes = [SessionAuthentication]
+  # No SessionAuthentication: its CSRF check can 403 browsers carrying a
+  # Django admin session cookie.
+  authentication_classes = []
 
   @transaction.atomic
   def post(self, request):
@@ -141,7 +176,7 @@ class SignupCompleteView(APIView):
     token = auth_header.split(' ')[1]
 
     try:
-      phone_number = _decode_ephemeral_token(token, 'signup_verified')
+      phone_number, jti = _decode_ephemeral_token(token, 'signup_verified')
     except Exception:
       return error_response(message='Invalid or expired token.', status_code=status.HTTP_401_UNAUTHORIZED)
 
@@ -162,6 +197,7 @@ class SignupCompleteView(APIView):
       password=serializer.validated_data['password'],
       marketing_consent=serializer.validated_data.get('marketing_consent', False),
     )
+    _mark_jti_used(jti)
 
     access_token, refresh = _issue_tokens(user)
     response = success_response(
@@ -197,12 +233,8 @@ class LoginView(APIView):
     lockout_key = f'login_attempts:{phone}'
     attempts = cache.get(lockout_key, 0)
     if attempts >= settings.LOGIN_MAX_ATTEMPTS:
-      locked_at = cache.get(f'{lockout_key}:locked_at')
-      if locked_at:
-        elapsed = time.time() - locked_at
-        remaining = max(0, int(900 - elapsed))
-      else:
-        remaining = 0
+      # LocMemCache (dev) lacks .ttl — fall back to the full lockout window
+      remaining = cache.ttl(lockout_key) if hasattr(cache, 'ttl') else settings.LOGIN_LOCKOUT_SECONDS
       return error_response(
         {'detail': f'Account locked. Try again in {remaining} seconds.'},
         'Too many failed attempts.',
@@ -213,10 +245,7 @@ class LoginView(APIView):
 
     if user is None:
       # Increment failed attempts
-      new_attempts = attempts + 1
-      cache.set(lockout_key, new_attempts, timeout=settings.LOGIN_LOCKOUT_SECONDS)
-      if new_attempts >= settings.LOGIN_MAX_ATTEMPTS:
-        cache.set(f'{lockout_key}:locked_at', time.time(), timeout=settings.LOGIN_LOCKOUT_SECONDS)
+      cache.set(lockout_key, attempts + 1, timeout=settings.LOGIN_LOCKOUT_SECONDS)
       return error_response(
         {'detail': 'Invalid phone number or password.'},
         'Login failed.',
@@ -232,7 +261,6 @@ class LoginView(APIView):
 
     # Clear failed attempts on success
     cache.delete(lockout_key)
-    cache.delete(f'{lockout_key}:locked_at')
 
     access_token, refresh = _issue_tokens(user)
     response = success_response(
@@ -279,10 +307,12 @@ class TokenRefreshView(APIView):
       return error_response(message='No refresh token.', status_code=status.HTTP_401_UNAUTHORIZED)
     try:
       refresh = RefreshToken(refresh_token)
-      access_token = str(refresh.access_token)
-      response = success_response({'access_token': access_token}, 'Token refreshed.')
-      # If ROTATE_REFRESH_TOKENS=True, update cookie with new refresh token
-      _set_refresh_cookie(response, str(refresh))
+      user = User.objects.get(id=refresh['user_id'], is_active=True)
+      # Real rotation: blacklist the incoming token, issue a fresh one
+      refresh.blacklist()
+      new_refresh = RefreshToken.for_user(user)
+      response = success_response({'access_token': str(new_refresh.access_token)}, 'Token refreshed.')
+      _set_refresh_cookie(response, str(new_refresh))
       return response
     except Exception:
       response = error_response(message='Invalid or expired refresh token.', status_code=status.HTTP_401_UNAUTHORIZED)
@@ -293,7 +323,9 @@ class TokenRefreshView(APIView):
 class PasswordResetCompleteView(APIView):
   permission_classes = [AllowAny]
   # Uses custom ephemeral token instead of DRF JWT auth token.
-  authentication_classes = [SessionAuthentication]
+  # No SessionAuthentication: its CSRF check can 403 browsers carrying a
+  # Django admin session cookie.
+  authentication_classes = []
 
   @transaction.atomic
   def post(self, request):
@@ -303,7 +335,7 @@ class PasswordResetCompleteView(APIView):
     token = auth_header.split(' ')[1]
 
     try:
-      phone_number = _decode_ephemeral_token(token, 'password_reset_verified')
+      phone_number, jti = _decode_ephemeral_token(token, 'password_reset_verified')
     except Exception:
       return error_response(message='Invalid or expired token.', status_code=status.HTTP_401_UNAUTHORIZED)
 
@@ -318,6 +350,7 @@ class PasswordResetCompleteView(APIView):
 
     user.set_password(serializer.validated_data['password'])
     user.save(update_fields=['password'])
+    _mark_jti_used(jti)
 
     # Blacklist all existing refresh tokens for this user
     from rest_framework_simplejwt.token_blacklist.models import OutstandingToken

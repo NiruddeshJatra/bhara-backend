@@ -438,3 +438,179 @@ class ProfileViewTest(TestCase):
     # For now, just test the basic structure
     # In a real implementation, you'd need to create the rentals app first
     pass
+
+
+class OTPBruteForceTest(TestCase):
+  """§9 item 1 — OTP verify attempt cap and throttle."""
+
+  def setUp(self):
+    cache.clear()
+    self.phone = '01712345678'
+
+  def _verify(self, otp):
+    return self.client.post('/api/auth/otp/verify/', {
+      'phone_number': self.phone,
+      'otp': otp,
+      'purpose': 'signup'
+    }, content_type='application/json')
+
+  def test_otp_deleted_after_5_wrong_attempts(self):
+    """5 wrong attempts delete the OTP — correct OTP no longer works."""
+    otp = create_otp('signup', self.phone)
+    for _ in range(5):
+      response = self._verify('999999')
+      self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+    self.assertIsNone(cache.get(f'otp:signup:{self.phone}'))
+    response = self._verify(otp)
+    self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+
+  def test_correct_otp_succeeds_after_4_wrong_attempts(self):
+    """Attempt counter only kills the OTP at 5 — 4 wrong then correct is fine."""
+    otp = create_otp('signup', self.phone)
+    for _ in range(4):
+      self._verify('999999')
+    response = self._verify(otp)
+    self.assertEqual(response.status_code, status.HTTP_200_OK)
+    self.assertTrue(response.json()['success'])
+
+  def test_otp_verify_throttled_after_10_per_minute(self):
+    """AnonRateThrottle (10/min) kicks in on the 11th verify request."""
+    create_otp('signup', self.phone)
+    for _ in range(10):
+      response = self._verify('999999')
+      self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+    response = self._verify('999999')
+    self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+
+class SMSCapTest(TestCase):
+  """§9 item 2 — per-phone SMS caps (1/min, 5/day)."""
+
+  def setUp(self):
+    cache.clear()
+    self.phone = '01712345678'
+    self.data = {'phone_number': self.phone, 'purpose': 'signup'}
+
+  def test_second_request_within_minute_capped(self):
+    response = self.client.post('/api/auth/otp/request/', self.data, content_type='application/json')
+    self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    response = self.client.post('/api/auth/otp/request/', self.data, content_type='application/json')
+    self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+    self.assertFalse(response.json()['success'])
+
+  def test_daily_cap_of_5_per_phone(self):
+    cache.set(f'sms_cap:day:{self.phone}', 5, timeout=86400)
+    response = self.client.post('/api/auth/otp/request/', self.data, content_type='application/json')
+    self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+    self.assertFalse(response.json()['success'])
+
+  def test_daily_counter_increments_per_send(self):
+    self.client.post('/api/auth/otp/request/', self.data, content_type='application/json')
+    self.assertEqual(cache.get(f'sms_cap:day:{self.phone}'), 1)
+
+
+class LoginLockoutTTLTest(TestCase):
+  """§9 item 3 — cache.ttl() guard: LocMemCache lacks .ttl, must not crash."""
+
+  def setUp(self):
+    cache.clear()
+    self.user = UserFactory(phone_number='01712345678')
+    self.user.set_password('Testpass123')
+    self.user.save()
+
+  def test_lockout_falls_back_to_lockout_window_without_ttl_support(self):
+    from django.conf import settings as dj_settings
+    # Precondition: dev cache backend has no .ttl (the crash §9.3 guards against)
+    self.assertFalse(hasattr(cache, 'ttl'))
+
+    cache.set('login_attempts:01712345678', dj_settings.LOGIN_MAX_ATTEMPTS, timeout=900)
+    response = self.client.post('/api/auth/login/', {
+      'phone_number': '01712345678',
+      'password': 'Testpass123'
+    }, content_type='application/json')
+
+    self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+    self.assertIn(
+      f'Try again in {dj_settings.LOGIN_LOCKOUT_SECONDS} seconds',
+      response.json()['data']['detail']
+    )
+
+
+class TokenRotationTest(TestCase):
+  """§9 item 4 — real refresh rotation with old token blacklisted."""
+
+  def setUp(self):
+    self.user = UserFactory()
+    self.old_refresh = str(RefreshToken.for_user(self.user))
+    self.client.cookies['refresh_token'] = self.old_refresh
+
+  def test_refresh_sets_a_new_rotated_token(self):
+    response = self.client.post('/api/auth/token/refresh/')
+    self.assertEqual(response.status_code, status.HTTP_200_OK)
+    new_refresh = response.cookies['refresh_token'].value
+    self.assertNotEqual(new_refresh, self.old_refresh)
+
+  def test_old_refresh_token_is_blacklisted_after_rotation(self):
+    response = self.client.post('/api/auth/token/refresh/')
+    self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    # Replay the pre-rotation token — must be rejected
+    self.client.cookies['refresh_token'] = self.old_refresh
+    response = self.client.post('/api/auth/token/refresh/')
+    self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+    self.assertFalse(response.json()['success'])
+
+
+class EphemeralTokenSingleUseTest(TestCase):
+  """§9 item 5 — ephemeral token jti is single-use."""
+
+  def setUp(self):
+    cache.clear()
+    self.phone = '01712345678'
+
+  def _get_ephemeral_token(self, purpose):
+    otp = create_otp(purpose, self.phone)
+    response = self.client.post('/api/auth/otp/verify/', {
+      'phone_number': self.phone,
+      'otp': otp,
+      'purpose': purpose
+    }, content_type='application/json')
+    self.assertEqual(response.status_code, status.HTTP_200_OK)
+    return response.json()['data']['ephemeral_token']
+
+  def test_signup_token_rejected_on_reuse(self):
+    token = self._get_ephemeral_token('signup')
+    data = {'full_name': 'John Doe', 'password': 'Testpass123'}
+
+    response = self.client.post('/api/auth/signup/complete/', data,
+                                content_type='application/json',
+                                HTTP_AUTHORIZATION=f'Bearer {token}')
+    self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    User.objects.filter(phone_number=self.phone).delete()
+    response = self.client.post('/api/auth/signup/complete/', data,
+                                content_type='application/json',
+                                HTTP_AUTHORIZATION=f'Bearer {token}')
+    self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+    self.assertFalse(response.json()['success'])
+
+  def test_password_reset_token_rejected_on_reuse(self):
+    user = UserFactory(phone_number=self.phone)
+    user.set_password('Oldpass123')
+    user.save()
+
+    token = self._get_ephemeral_token('password_reset')
+    data = {'password': 'Newpass456'}
+
+    response = self.client.post('/api/auth/password-reset/complete/', data,
+                                content_type='application/json',
+                                HTTP_AUTHORIZATION=f'Bearer {token}')
+    self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    response = self.client.post('/api/auth/password-reset/complete/', data,
+                                content_type='application/json',
+                                HTTP_AUTHORIZATION=f'Bearer {token}')
+    self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+    self.assertFalse(response.json()['success'])
