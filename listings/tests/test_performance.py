@@ -8,6 +8,7 @@ from django.test import TestCase
 from django.test.utils import CaptureQueriesContext
 from django.db import connection
 
+from listings.models import UnavailablePeriod
 from listings.services import get_blocked_dates
 from listings.tests.factories import ProductFactory, PricingTierFactory
 from rentals.tests.factories import RentalFactory
@@ -67,6 +68,52 @@ class BlockedDatesWindowTest(TestCase):
     self.assertIn(self.window_start, blocked)
     self.assertIn(self.window_start + timedelta(days=1), blocked)
 
+  def test_unavailable_period_single_day(self):
+    # Within window
+    in_date = self.window_start + timedelta(days=1)
+    UnavailablePeriod.objects.create(
+      product=self.product,
+      is_range=False,
+      date=in_date,
+    )
+    # Outside window
+    out_date = self.window_start + timedelta(days=10)
+    UnavailablePeriod.objects.create(
+      product=self.product,
+      is_range=False,
+      date=out_date,
+    )
+    blocked = get_blocked_dates(self.product, start=self.window_start, end=self.window_end)
+    self.assertIn(in_date, blocked)
+    self.assertNotIn(out_date, blocked)
+
+  def test_unavailable_period_ranges(self):
+    # Fully outside window (future)
+    UnavailablePeriod.objects.create(
+      product=self.product,
+      is_range=True,
+      date=self.window_start + timedelta(days=10),
+      range_start=self.window_start + timedelta(days=10),
+      range_end=self.window_start + timedelta(days=12),
+    )
+    # Overlapping the window
+    UnavailablePeriod.objects.create(
+      product=self.product,
+      is_range=True,
+      date=self.window_start - timedelta(days=2),
+      range_start=self.window_start - timedelta(days=2),
+      range_end=self.window_start + timedelta(days=1),
+    )
+    blocked = get_blocked_dates(self.product, start=self.window_start, end=self.window_end)
+    # The overlapping one blocks start_date - 2 to start_date + 1
+    # Within the window [start_date, start_date + 3], start_date and start_date + 1 should be blocked.
+    self.assertIn(self.window_start, blocked)
+    self.assertIn(self.window_start + timedelta(days=1), blocked)
+    # But start_date + 2 should not be blocked
+    self.assertNotIn(self.window_start + timedelta(days=2), blocked)
+    # The range fully outside window should not be blocked
+    self.assertNotIn(self.window_start + timedelta(days=10), blocked)
+
   def test_no_window_keeps_full_history_behavior(self):
     far_start = date.today() + timedelta(days=100)
     RentalFactory(
@@ -91,4 +138,9 @@ class BlockedDatesWindowTest(TestCase):
       get_blocked_dates(self.product, start=self.window_start, end=self.window_end)
     rental_queries = [q['sql'] for q in ctx.captured_queries if 'rentals_rental' in q['sql']]
     self.assertTrue(rental_queries)
-    self.assertIn('start_date', rental_queries[0])
+    sql = rental_queries[0]
+    self.assertIn('start_date', sql)
+    self.assertIn('end_date', sql)
+    # Check for the overlap operators
+    self.assertIn('<=', sql)
+    self.assertIn('>=', sql)

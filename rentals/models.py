@@ -142,6 +142,10 @@ class Rental(models.Model):
                     f"rental was modified by a concurrent request."
                 )
 
+            # Update in-memory self.status to match the freshly locked database status,
+            # ensuring all subsequent checks and guards run against the latest status.
+            self.status = current_status
+
             allowed = ALLOWED_TRANSITIONS.get(self.status, {})
             if new_status not in allowed:
                 raise TransitionError(

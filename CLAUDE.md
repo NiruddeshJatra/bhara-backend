@@ -151,9 +151,9 @@ pyrightconfig.json       ← points Pyright to venv (venvPath + venv keys)
 ## Running Tests
 
 ```bash
-pytest                        # all 179 tests (~9 min — tests hit real dev SQLite; never run two suites at once)
+pytest                        # all 181 tests (~9 min — tests hit real dev SQLite; never run two suites at once)
 pytest users/                 # 70 auth tests
-pytest listings/              # 25 listings tests
+pytest listings/              # 27 listings tests
 pytest rentals/               # 58 rentals tests (matrix, double-booking, §5.3, snapshot, photos, query counts, state re-check)
 pytest reviews/               # 21 reviews tests (creation rules, aggregation, list, pending)
 pytest -x -v                  # stop on first failure, verbose

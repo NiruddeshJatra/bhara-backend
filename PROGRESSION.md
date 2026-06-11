@@ -122,3 +122,18 @@ Sequential history of every significant change. Read top-to-bottom for full pict
 - **Security**: `Rental.transition()` now re-reads status under `select_for_update` inside `atomic()` — stale in-memory instance can no longer double-apply a transition or bypass the matrix (product → rental lock order, deadlock-free). `LoginRateThrottle` 10/min/IP; `OTPDailyRateThrottle` 20/day/IP (SMS billing attack: 3/min alone allowed 4,320 SMS/day/IP). Signup `create_user` catches `IntegrityError` (TOCTOU 500 → 400). HSTS 1 year in production.
 - **Tests**: +10 new (179 total) — `listings/tests/test_performance.py` (distinct filters, blocked-dates window + SQL-filter assertion), `rentals/tests/test_performance.py` (list must not query payment records), `rentals/tests/test_state_recheck.py` (stale-instance transition guards).
 - **Discovered**: `conftest.py` no-ops `django_db_setup` — suite runs against real dev `db.sqlite3` (~9 min, concurrent runs corrupt each other). Documented in CLAUDE.md + audit; fix deferred pending approval.
+
+---
+
+## Code Review Fixes (Post-Performance Audit & Rentals/Reviews)
+**2026-06-11 — address comments on serializer context in pagination, transition status validation, and blocked-dates window tests**
+
+- **`core/pagination.py`**: refactored `paginated_success_response` to temporarily set `viewset.serializer_class` and use `viewset.get_serializer(...)` instead of directly instantiating the serializer, ensuring serializer context (such as request/view) propagates correctly.
+- **`core/pagination.py`**: modified non-paginated branch to always return `count`, `next: None`, `previous: None`, and `results` keys for response shape consistency.
+- **`listings/views.py`**: simplified `ProductViewSet._paginated_response` to delegate directly to the shared `paginated_success_response` helper, avoiding duplication.
+- **`rentals/models.py`**: updated `Rental.transition` to store `self.status = current_status` immediately after the concurrent modification check under lock, ensuring all subsequent validation checks and edge guards run against the fresh status.
+- **`listings/tests/test_performance.py`**:
+  - Added coverage for windowed `unavailable_periods` checks: single-day `UnavailablePeriod` (within window) and ranges (one fully outside, one overlapping window).
+  - Strengthened SQL assertion in `test_windowed_query_filters_in_sql` to check for both `start_date` and `end_date` with the overlap operators (`<=` and `>=`).
+- **Tests**: +2 new (181 total) — `test_unavailable_period_single_day`, `test_unavailable_period_ranges`.
+
