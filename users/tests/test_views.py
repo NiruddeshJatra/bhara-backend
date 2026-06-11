@@ -6,7 +6,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.core.cache import cache
 from users.models import User
 from users.tests.factories import UserFactory, VerifiedUserFactory
-from services.otp import create_otp
+from services.otp import create_otp, _attempts_key
 
 
 class OTPViewTest(TestCase):
@@ -482,6 +482,22 @@ class OTPBruteForceTest(TestCase):
       self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
     response = self._verify('999999')
     self.assertEqual(response.status_code, status.HTTP_429_TOO_MANY_REQUESTS)
+
+  def test_attempt_counter_reset_after_success(self):
+    """Successful verification clears the attempt counter."""
+    otp = create_otp('signup', self.phone)
+    self._verify('000000')  # one wrong attempt
+    self.assertIsNotNone(cache.get(_attempts_key('signup', self.phone)))
+    self._verify(otp)  # correct
+    self.assertIsNone(cache.get(_attempts_key('signup', self.phone)))
+
+  def test_attempt_counter_reset_on_new_otp(self):
+    """Requesting a new OTP resets the attempt counter for that phone+purpose."""
+    create_otp('signup', self.phone)
+    self._verify('000000')  # wrong attempt — increments counter
+    self.assertIsNotNone(cache.get(_attempts_key('signup', self.phone)))
+    create_otp('signup', self.phone)  # fresh OTP request
+    self.assertIsNone(cache.get(_attempts_key('signup', self.phone)))
 
 
 class SMSCapTest(TestCase):
