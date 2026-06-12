@@ -386,20 +386,20 @@ class ProfileStep1View(APIView):
 
   @transaction.atomic
   def patch(self, request):
-    # Compress profile picture before transaction if provided
+    # request.data caches the original (already-consumed) file stream, so
+    # build the serializer payload explicitly with the compressed file.
+    data = {k: v for k, v in request.data.items() if k != 'profile_picture'}
     if 'profile_picture' in request.FILES and request.FILES['profile_picture']:
-      request.FILES._mutable = True
-      request.FILES['profile_picture'] = compress_image(
+      data['profile_picture'] = compress_image(
         request.FILES['profile_picture'],
         max_width=800,
         max_height=800,
         quality=85
       )
-      request.FILES._mutable = False
-    
+
     serializer = user_serializers.ProfileStep1Serializer(
       instance=request.user,
-      data=request.data,
+      data=data,
       partial=True
     )
     if not serializer.is_valid():
@@ -423,30 +423,31 @@ class ProfileStep2View(APIView):
         status_code=status.HTTP_403_FORBIDDEN
       )
     
-    # Compress images before transaction
+    # request.data caches the original (already-consumed) file streams, so
+    # build the serializer payload explicitly with the compressed files.
+    data = {
+      k: v for k, v in request.data.items()
+      if k not in ('nid_image', 'institutional_id_image')
+    }
     if 'nid_image' in request.FILES and request.FILES['nid_image']:
-      request.FILES._mutable = True
-      request.FILES['nid_image'] = compress_image(
+      data['nid_image'] = compress_image(
         request.FILES['nid_image'],
         max_width=1200,
         max_height=900,
         quality=90
       )
-    
+
     if 'institutional_id_image' in request.FILES and request.FILES['institutional_id_image']:
-      if not hasattr(request.FILES, '_mutable') or not request.FILES._mutable:
-        request.FILES._mutable = True
-      request.FILES['institutional_id_image'] = compress_image(
+      data['institutional_id_image'] = compress_image(
         request.FILES['institutional_id_image'],
         max_width=1200,
         max_height=900,
         quality=90
       )
-      request.FILES._mutable = False
 
     serializer = user_serializers.ProfileStep2Serializer(
       instance=request.user,
-      data=request.data
+      data=data
     )
     if not serializer.is_valid():
       return error_response(serializer.errors, 'Validation failed.')
